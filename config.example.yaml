@@ -1,0 +1,19 @@
+google_drive:
+  root_folder_id: "1NhmSheM1A6XylV1HAwhq4oqRk5lvZpLY"
+
+cache:
+  directory: "./cache"
+  cleanup: true
+
+review:
+  filename: "review.xlsx"
+  preview_width_px: 180
+
+catalog:
+  filename: "catalog.xlsx"
+
+descriptions:
+  patterns:
+    - "описание.txt"
+    - "description.txt"
+  scope: "current_folder"

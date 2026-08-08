@@ -5,19 +5,19 @@
 The project source code is stored in this GitHub repository:
 
 ```text
-https://github.com/mamton76/family_photo
+https://github.com/mamton76/family_photo_new
 ```
 
 Repository full name:
 
 ```text
-mamton76/family_photo
+mamton76/family_photo_new
 ```
 
 Default branch:
 
 ```text
-main
+master
 ```
 
 The working project name may remain `family-photo-archive`; do not rename the GitHub repository solely to match the internal project name.
