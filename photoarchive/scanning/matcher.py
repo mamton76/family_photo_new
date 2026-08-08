@@ -27,6 +27,22 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from photoarchive.naming import filename_stem, split_fragments
+
+__all__ = [
+    "DescriptionMatch",
+    "DescriptionMatcher",
+    "FilenameReference",
+    "FilenameReferenceMatcher",
+    "MatchResult",
+    "filename_stem",
+    "find_referenced_filename",
+    "locate_reference",
+    "match_fragments_to_photos",
+    "split_fragments",
+    "strip_reference",
+]
+
 #: Characters trimmed from the edges of a fragment once the filename
 #: reference is removed: whitespace, dashes, punctuation and brackets.
 _EDGE_CHARACTERS = " \t -–—:;.,!?)]}([{«»\"'`"
@@ -76,15 +92,6 @@ class DescriptionMatcher(Protocol):
         ...
 
 
-def filename_stem(filename: str) -> str:
-    """Return a filename without its extension."""
-    stem, dot, _ = filename.rpartition(".")
-    return stem if dot else filename
-
-
-def split_fragments(text: str) -> list[str]:
-    """Split raw description text into fragments, one per non-empty line."""
-    return [line.strip() for line in text.splitlines() if line.strip()]
 
 
 def locate_reference(

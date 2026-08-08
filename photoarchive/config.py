@@ -20,8 +20,6 @@ import yaml
 DEFAULT_CONFIG_PATH = Path("config.yaml")
 EXAMPLE_CONFIG_PATH = Path("config.example.yaml")
 
-DEFAULT_DESCRIPTION_PATTERNS: tuple[str, ...] = ("описание.txt", "description.txt")
-
 
 class ConfigError(RuntimeError):
     """Raised when configuration is missing or malformed."""
@@ -55,13 +53,17 @@ class CatalogConfig:
 
 @dataclass(frozen=True, slots=True)
 class DescriptionsConfig:
-    """How per-folder description files are found and applied.
+    """How description documents are applied.
 
-    ``scope`` is ``current_folder``: a description file describes only the
+    ``scope`` is ``current_folder``: a description document describes only the
     photos directly contained in its own folder, not those in subfolders.
+
+    There is deliberately no filename-pattern setting. Discovery is
+    DOCX-only and not configurable: exactly one ``.docx`` in a folder is the
+    description, and every other non-photo file is reported as a diagnostic
+    without being parsed.
     """
 
-    patterns: tuple[str, ...] = DEFAULT_DESCRIPTION_PATTERNS
     scope: str = "current_folder"
 
 
@@ -86,10 +88,6 @@ class AppConfig:
         catalog = _section(data, "catalog")
         descriptions = _section(data, "descriptions")
 
-        patterns = descriptions.get("patterns") or list(DEFAULT_DESCRIPTION_PATTERNS)
-        if isinstance(patterns, str):
-            patterns = [patterns]
-
         return cls(
             google_drive=GoogleDriveConfig(root_folder_id=str(root_folder_id)),
             cache=CacheConfig(
@@ -102,7 +100,6 @@ class AppConfig:
             ),
             catalog=CatalogConfig(filename=str(catalog.get("filename", "catalog.xlsx"))),
             descriptions=DescriptionsConfig(
-                patterns=tuple(str(p) for p in patterns),
                 scope=str(descriptions.get("scope", "current_folder")),
             ),
         )

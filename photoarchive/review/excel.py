@@ -27,8 +27,13 @@ from photoarchive.models import PhotoReviewRecord
 
 VISIBLE_COLUMNS: tuple[str, ...] = (
     "Preview",
+    # Holds the photo filename, or the DOCX reference for DESCRIBED_ABSENT rows.
     "Filename",
     "Source Description",
+    # Inherited "Далее …" heading, kept apart from the description itself.
+    "Section Context",
+    # Verbatim notes such as "нет фото" (the paper original is lost).
+    "Source Notes",
     "Date",
     "Date Precision",
     "Place",
@@ -44,6 +49,10 @@ VISIBLE_COLUMNS: tuple[str, ...] = (
 )
 
 HIDDEN_COLUMNS: tuple[str, ...] = (
+    # Kept so absent references can be searched for across other source roots
+    # in a later phase.
+    "source_root_identity",
+    "description_document",
     "source_id",
     "source_path",
     "source_hash",

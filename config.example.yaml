@@ -12,8 +12,7 @@ review:
 catalog:
   filename: "catalog.xlsx"
 
+# Description documents are discovered as ".docx" only; that rule is not
+# configurable. A description applies to the photos directly in its own folder.
 descriptions:
-  patterns:
-    - "описание.txt"
-    - "description.txt"
   scope: "current_folder"

@@ -19,6 +19,8 @@ EXPECTED_VISIBLE_COLUMNS = (
     "Preview",
     "Filename",
     "Source Description",
+    "Section Context",
+    "Source Notes",
     "Date",
     "Date Precision",
     "Place",
@@ -34,6 +36,8 @@ EXPECTED_VISIBLE_COLUMNS = (
 )
 
 EXPECTED_HIDDEN_COLUMNS = (
+    "source_root_identity",
+    "description_document",
     "source_id",
     "source_path",
     "source_hash",
@@ -60,7 +64,13 @@ def test_all_columns_are_unique_and_visible_first() -> None:
 
 def test_column_index_is_one_based() -> None:
     assert column_index("Preview") == 1
-    assert column_index("source_id") == len(VISIBLE_COLUMNS) + 1
+    assert column_index("source_root_identity") == len(VISIBLE_COLUMNS) + 1
+
+
+def test_source_derived_columns_are_not_human_owned() -> None:
+    # Section context and source notes come from the DOCX, not the reviewer.
+    assert "Section Context" not in HUMAN_OWNED_COLUMNS
+    assert "Source Notes" not in HUMAN_OWNED_COLUMNS
 
 
 def test_human_owned_columns_are_visible_and_exclude_generated_ones() -> None:

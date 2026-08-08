@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from photoarchive.config import DEFAULT_DESCRIPTION_PATTERNS
 from photoarchive.models import RemoteSourceItem, SourceRoot
 from photoarchive.scanning.scanner import (
     FALLBACK_ROOT_NAME,
-    description_priority,
     destination_path,
+    is_description_document,
     is_photo,
     join_relative_path,
     normalize_relative_path,
@@ -54,13 +53,13 @@ def test_plan_folders_preserves_nested_relative_paths() -> None:
         RemoteSourceItem(name="1988", relative_path="1988", is_directory=True),
         _file("1988/Dacha/001.jpg"),
         _file("1988/Dacha/002.jpg"),
-        _file("1988/Dacha/description.txt"),
+        _file("1988/Dacha/Dacha.docx"),
         _file("1988/School/010.jpg"),
         _file("1990/Valaam/020.jpg"),
-        _file("1990/Valaam/описание.txt"),
+        _file("1990/Valaam/Валаам.docx"),
     ]
 
-    plans = plan_folders(items, DEFAULT_DESCRIPTION_PATTERNS)
+    plans = plan_folders(items)
 
     assert [plan.folder_path for plan in plans] == [
         "1988/Dacha",
@@ -69,7 +68,7 @@ def test_plan_folders_preserves_nested_relative_paths() -> None:
     ]
     assert [photo.name for photo in plans[0].photos] == ["001.jpg", "002.jpg"]
     assert plans[0].description is not None
-    assert plans[0].description.name == "description.txt"
+    assert plans[0].description.name == "Dacha.docx"
     assert plans[1].description is None
     assert plans[2].description is not None
     assert plans[2].folder_names == ("1990", "Valaam")
@@ -78,17 +77,17 @@ def test_plan_folders_preserves_nested_relative_paths() -> None:
 def test_plan_folders_skips_folders_without_photos() -> None:
     items = [
         _file("1988/readme.txt"),
-        _file("1988/description.txt"),
+        _file("1988/notes.docx"),
         _file("1988/Dacha/001.jpg"),
     ]
 
-    plans = plan_folders(items, DEFAULT_DESCRIPTION_PATTERNS)
+    plans = plan_folders(items)
 
     assert [plan.folder_path for plan in plans] == ["1988/Dacha"]
 
 
 def test_plan_folders_handles_photos_in_source_root() -> None:
-    plans = plan_folders([_file("001.jpg")], DEFAULT_DESCRIPTION_PATTERNS)
+    plans = plan_folders([_file("001.jpg")])
 
     assert len(plans) == 1
     assert plans[0].folder_path == ""
@@ -142,61 +141,81 @@ def test_destination_path_uses_the_sanitized_name() -> None:
     assert destination_path(_root("1988/Dacha"), "001.jpg") == "1988-Dacha/001.jpg"
 
 
-# -- Deterministic description selection ----------------------------------
+# -- DOCX-only description discovery --------------------------------------
 
 
-def test_description_priority_follows_configuration_order() -> None:
-    patterns = ("описание.txt", "description.txt")
+def test_is_description_document_accepts_only_docx() -> None:
+    assert is_description_document("archive.docx")
+    assert is_description_document("ARCHIVE.DOCX")
+    assert not is_description_document("archive.rtf")
+    assert not is_description_document("archive.txt")
+    assert not is_description_document("archive.doc")
+    assert not is_description_document("archive.pdf")
 
-    assert description_priority("описание.txt", patterns) == 0
-    assert description_priority("description.txt", patterns) == 1
-    assert description_priority("DESCRIPTION.TXT", patterns) == 1
-    assert description_priority("readme.txt", patterns) is None
+
+def test_exactly_one_docx_is_selected() -> None:
+    items = [_file("1990/020.jpg"), _file("1990/Валаам.docx")]
+
+    plan = plan_folders(items)[0]
+
+    assert plan.has_description
+    assert plan.description.name == "Валаам.docx"
+    assert not plan.has_ambiguous_description
 
 
-def test_multiple_description_files_resolve_by_configuration_order() -> None:
+def test_zero_docx_means_no_description() -> None:
+    plan = plan_folders([_file("1990/020.jpg")])[0]
+
+    assert plan.description is None
+    assert not plan.has_ambiguous_description
+    assert not plan.has_description
+
+
+def test_multiple_docx_is_a_conflict_and_none_is_chosen() -> None:
+    items = [_file("1990/020.jpg"), _file("1990/b.docx"), _file("1990/a.docx")]
+
+    plan = plan_folders(items)[0]
+
+    assert plan.has_ambiguous_description
+    # Deliberately no automatic pick: guessing would attach wrong descriptions.
+    assert plan.description is None
+    assert [item.name for item in plan.docx_candidates] == ["a.docx", "b.docx"]
+
+
+def test_non_photo_non_docx_files_are_preserved_as_diagnostics() -> None:
     items = [
-        _file("1990/Valaam/020.jpg"),
-        _file("1990/Valaam/description.txt"),
-        _file("1990/Valaam/описание.txt"),
+        _file("1990/020.jpg"),
+        _file("1990/Валаам.docx"),
+        _file("1990/Валаам.rtf"),
+        _file("1990/notes.txt"),
     ]
 
-    plans = plan_folders(items, DEFAULT_DESCRIPTION_PATTERNS)
+    plan = plan_folders(items)[0]
 
-    assert plans[0].has_ambiguous_description
-    # "описание.txt" comes first in DEFAULT_DESCRIPTION_PATTERNS and so wins,
-    # regardless of the order the storage provider listed the files in.
-    assert plans[0].description is not None
-    assert plans[0].description.name == "описание.txt"
-    assert [item.name for item in plans[0].descriptions] == [
-        "описание.txt",
-        "description.txt",
+    # Sorted by name; ASCII sorts before Cyrillic.
+    assert [item.name for item in plan.other_files] == ["notes.txt", "Валаам.rtf"]
+    assert plan.description.name == "Валаам.docx"
+
+
+def test_rtf_alone_is_not_treated_as_a_description() -> None:
+    items = [_file("1990/020.jpg"), _file("1990/Валаам.rtf")]
+
+    plan = plan_folders(items)[0]
+
+    assert plan.description is None
+    assert [item.name for item in plan.other_files] == ["Валаам.rtf"]
+
+
+def test_plan_folders_is_deterministic() -> None:
+    items = [
+        _file("1990/021.jpg"),
+        _file("1990/020.jpg"),
+        _file("1990/b.rtf"),
+        _file("1990/a.rtf"),
     ]
 
+    first = plan_folders(items)[0]
+    second = plan_folders(list(reversed(items)))[0]
 
-def test_description_selection_is_independent_of_listing_order() -> None:
-    photo = _file("1990/Valaam/020.jpg")
-    first = _file("1990/Valaam/описание.txt")
-    second = _file("1990/Valaam/description.txt")
-
-    forward = plan_folders([photo, first, second], DEFAULT_DESCRIPTION_PATTERNS)
-    reverse = plan_folders([photo, second, first], DEFAULT_DESCRIPTION_PATTERNS)
-
-    assert forward[0].description.name == reverse[0].description.name
-
-
-def test_single_description_file_is_not_ambiguous() -> None:
-    items = [_file("1988/Dacha/001.jpg"), _file("1988/Dacha/description.txt")]
-
-    plans = plan_folders(items, DEFAULT_DESCRIPTION_PATTERNS)
-
-    assert not plans[0].has_ambiguous_description
-    assert plans[0].description.name == "description.txt"
-
-
-def test_folder_without_description_has_none() -> None:
-    plans = plan_folders([_file("1988/School/010.jpg")], DEFAULT_DESCRIPTION_PATTERNS)
-
-    assert plans[0].description is None
-    assert plans[0].descriptions == []
-    assert not plans[0].has_ambiguous_description
+    assert [p.name for p in first.photos] == [p.name for p in second.photos]
+    assert [o.name for o in first.other_files] == [o.name for o in second.other_files]

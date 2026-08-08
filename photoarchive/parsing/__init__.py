@@ -1,11 +1,23 @@
-"""Turning source text and path context into reviewable metadata proposals."""
+"""Turning source documents and path context into reviewable data."""
 
-from photoarchive.parsing.descriptions import DescriptionParser, PlainTextDescriptionParser
+from photoarchive.parsing.descriptions import (
+    DescriptionEntry,
+    ParsedDescriptionDocument,
+    Reconciliation,
+    parse_description_document,
+    reconcile_entries,
+)
+from photoarchive.parsing.docx import DocxError, extract_paragraphs
 from photoarchive.parsing.metadata import MetadataProposer, ProposalContext
 
 __all__ = [
-    "DescriptionParser",
+    "DescriptionEntry",
+    "DocxError",
     "MetadataProposer",
-    "PlainTextDescriptionParser",
+    "ParsedDescriptionDocument",
     "ProposalContext",
+    "Reconciliation",
+    "extract_paragraphs",
+    "parse_description_document",
+    "reconcile_entries",
 ]

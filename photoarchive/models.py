@@ -22,6 +22,10 @@ class WorkflowStatus(str, Enum):
     PUBLISHED = "PUBLISHED"
     SOURCE_CHANGED = "SOURCE_CHANGED"
     SOURCE_MISSING = "SOURCE_MISSING"
+    #: Described in a folder's DOCX, but no matching photo is present in that
+    #: scanned source folder. Distinct from SOURCE_MISSING, which means a photo
+    #: the pipeline saw before has since disappeared.
+    DESCRIBED_ABSENT = "DESCRIBED_ABSENT"
     ERROR = "ERROR"
     SKIP = "SKIP"
 
@@ -102,9 +106,14 @@ class PhotoReviewRecord:
     """
 
     # Visible, human-reviewable fields.
+    #: The photo's filename, or the DOCX reference when the photo is absent.
     filename: str
     source_path: str
     source_description: str | None = None
+    #: Inherited "Далее …" heading; kept apart from the description itself.
+    section_context: str | None = None
+    #: Verbatim source notes such as "нет фото" (the paper original is lost).
+    source_notes: list[str] = field(default_factory=list)
     date: str | None = None
     date_precision: DatePrecision = DatePrecision.UNKNOWN
     place: str | None = None
@@ -118,7 +127,15 @@ class PhotoReviewRecord:
     status: WorkflowStatus = WorkflowStatus.NEW
     notes: str | None = None
 
+    #: False for DESCRIBED_ABSENT rows: described, but not in this folder.
+    is_present: bool = True
+
     # Technical, pipeline-owned fields (hidden columns in the workbook).
+    #: Kept so absent references can be searched for across other source roots
+    #: in a later phase; no cross-folder resolution happens yet.
+    source_root_identity: str | None = None
+    #: Filename of the DOCX the description came from.
+    description_document: str | None = None
     source_id: str | None = None
     source_hash: str | None = None
     description_hash: str | None = None

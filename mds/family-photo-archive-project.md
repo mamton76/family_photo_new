@@ -73,15 +73,15 @@ Family Archive/
 │   ├── Dacha/
 │   │   ├── 001.jpg
 │   │   ├── 002.jpg
-│   │   └── description.txt
+│   │   └── description.docx
 │   └── School/
 │       ├── 010.jpg
-│       └── description.txt
+│       └── some.docx
 └── 1990/
     └── Valaam/
         ├── 020.jpg
         ├── 021.jpg
-        └── description.txt
+        └── text.docx
 ```
 
 ### Destination: Google Drive
@@ -497,9 +497,6 @@ catalog:
   filename: "catalog.xlsx"
 
 descriptions:
-  patterns:
-    - "описание.txt"
-    - "description.txt"
   scope: "current_folder"
 ```
 

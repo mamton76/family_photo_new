@@ -43,6 +43,9 @@ _UNSAFE_NAME_CHARACTERS = str.maketrans({"/": "-", "\\": "-", "\n": " ", "\r": "
 
 FALLBACK_ROOT_NAME = "source"
 
+#: The only description format parsed in this phase.
+DESCRIPTION_DOCUMENT_EXTENSION = ".docx"
+
 
 def is_photo(name: str) -> bool:
     """Report whether a filename looks like a photo, by extension."""
@@ -95,24 +98,13 @@ def destination_path(source_root: SourceRoot, relative_path: str = "") -> str:
     return join_relative_path(sanitize_folder_name(source_root.name), relative_path)
 
 
-def description_priority(name: str, patterns: Sequence[str]) -> int | None:
-    """Return the configured priority of a description filename.
+def is_description_document(name: str) -> bool:
+    """Report whether a filename is a parsable description document.
 
-    Lower is better, and the priority *is* the pattern's position in
-    ``descriptions.patterns``, so configuration order decides which file wins
-    when a folder contains more than one. ``None`` means "not a description
-    file".
+    Only ``.docx`` is parsed in this phase. Other non-photo files (``.rtf``,
+    ``.txt``, ``.pdf``, ``.doc``) are preserved as diagnostics but never read.
     """
-    lowered = name.casefold()
-    for index, pattern in enumerate(patterns):
-        if lowered == pattern.casefold():
-            return index
-    return None
-
-
-def is_description_file(name: str, patterns: Sequence[str]) -> bool:
-    """Match a filename against the configured description-file patterns."""
-    return description_priority(name, patterns) is not None
+    return name.casefold().endswith(DESCRIPTION_DOCUMENT_EXTENSION)
 
 
 @dataclass(slots=True)
@@ -125,22 +117,31 @@ class FolderScanPlan:
 
     folder_path: str
     photos: list[RemoteSourceItem] = field(default_factory=list)
-    descriptions: list[RemoteSourceItem] = field(default_factory=list)
+    #: Every ``.docx`` found directly in this folder.
+    docx_candidates: list[RemoteSourceItem] = field(default_factory=list)
+    #: Non-photo files that are not the description document. Diagnostics
+    #: only — they are reported but never parsed.
+    other_files: list[RemoteSourceItem] = field(default_factory=list)
 
     @property
     def description(self) -> RemoteSourceItem | None:
-        """The description file that applies, or ``None``.
+        """The description document, or ``None``.
 
-        When a folder holds several matching files, the winner is decided
-        deterministically by configuration order and then by name, so repeated
-        scans of an unchanged folder always pick the same file.
+        Exactly one ``.docx`` is required. Zero means there is no description;
+        several mean a genuine conflict, and none is chosen automatically —
+        picking arbitrarily would silently attach the wrong descriptions to
+        photos.
         """
-        return self.descriptions[0] if self.descriptions else None
+        return self.docx_candidates[0] if len(self.docx_candidates) == 1 else None
 
     @property
     def has_ambiguous_description(self) -> bool:
-        """True when several description files matched and one was chosen."""
-        return len(self.descriptions) > 1
+        """True when several ``.docx`` files compete and none was selected."""
+        return len(self.docx_candidates) > 1
+
+    @property
+    def has_description(self) -> bool:
+        return self.description is not None
 
     @property
     def folder_names(self) -> tuple[str, ...]:
@@ -148,18 +149,16 @@ class FolderScanPlan:
         return tuple(segment for segment in self.folder_path.split("/") if segment)
 
 
-def plan_folders(
-    items: Iterable[RemoteSourceItem],
-    description_patterns: Sequence[str],
-) -> list[FolderScanPlan]:
+def plan_folders(items: Iterable[RemoteSourceItem]) -> list[FolderScanPlan]:
     """Group a flat recursive listing into per-folder scan plans.
 
     Nested relative paths are preserved verbatim, so the destination mirror can
     reuse them. Folders without photos produce no plan and therefore no
-    workbook, even when they contain a description file.
+    workbook, even when they contain a description document.
     """
     photos: dict[str, list[RemoteSourceItem]] = {}
-    descriptions: dict[str, list[tuple[int, str, RemoteSourceItem]]] = {}
+    documents: dict[str, list[RemoteSourceItem]] = {}
+    others: dict[str, list[RemoteSourceItem]] = {}
 
     for item in items:
         if item.is_directory:
@@ -167,19 +166,21 @@ def plan_folders(
         folder = normalize_relative_path(item.parent_path)
         if is_photo(item.name):
             photos.setdefault(folder, []).append(item)
-            continue
-        priority = description_priority(item.name, description_patterns)
-        if priority is not None:
-            descriptions.setdefault(folder, []).append((priority, item.name, item))
+        elif is_description_document(item.name):
+            documents.setdefault(folder, []).append(item)
+        else:
+            others.setdefault(folder, []).append(item)
 
     plans: list[FolderScanPlan] = []
     for folder in sorted(photos):
-        candidates = sorted(descriptions.get(folder, []), key=lambda entry: entry[:2])
         plans.append(
             FolderScanPlan(
                 folder_path=folder,
                 photos=sorted(photos[folder], key=lambda photo: photo.name),
-                descriptions=[item for _, _, item in candidates],
+                docx_candidates=sorted(
+                    documents.get(folder, []), key=lambda item: item.name
+                ),
+                other_files=sorted(others.get(folder, []), key=lambda item: item.name),
             )
         )
     return plans
@@ -210,8 +211,7 @@ class Scanner:
         The listing call is the only cloud interaction here; the grouping is
         pure and covered by unit tests.
         """
-        items = self.source.list_recursive()
-        return plan_folders(items, self.config.descriptions.patterns)
+        return plan_folders(self.source.list_recursive())
 
     def scan(self, source_root: SourceRoot) -> list[FolderScanPlan]:
         """Run a full scan for one source root.
