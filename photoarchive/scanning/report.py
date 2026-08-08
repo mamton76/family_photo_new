@@ -242,6 +242,121 @@ def _render_folder(
     return lines
 
 
+def render_local_review_report(results, dictionary, *, verbose: bool = False) -> str:
+    """Report generated workbooks, dictionary usage and learning candidates.
+
+    Dictionary counts describe matches *used* for suggestions. Candidates are
+    hints discovered while matching: they have changed no confirmed knowledge
+    and will not until a human approves rows and ``learn`` runs.
+    """
+    lines: list[str] = ["Generated review workbooks", "--------------------------"]
+    if not results:
+        lines.append("(none: no folder contained photos)")
+    for result in results:
+        lines.append(f"[folder] {result.folder_path or ROOT_FOLDER_LABEL}")
+        lines.append(f"workbook: {result.workbook_path}")
+        lines.append(
+            f"rows: {result.rows}  previews: {result.previews}  "
+            f"DESCRIBED_ABSENT: {result.absent_rows}"
+        )
+        if result.outcome is not None:
+            outcome = result.outcome
+            lines.append(
+                f"created: {len(outcome.created)}  unchanged: {len(outcome.unchanged)}  "
+                f"description changed: {len(outcome.description_changed)}  "
+                f"photo changed: {len(outcome.photo_changed)}  "
+                f"newly present: {len(outcome.became_present)}  "
+                f"missing: {len(outcome.went_missing)}"
+            )
+        lines.append(
+            f"suggested date: {result.suggested_dates}  "
+            f"place: {result.suggested_places}  "
+            f"people: {result.suggested_people}  "
+            f"tags: {result.suggested_tags}  "
+            f"latlon: {result.suggested_latlon}"
+        )
+        if result.outcome is not None:
+            lines.append(
+                f"blank finals filled: {len(result.outcome.autofilled)}  "
+                f"rows with preserved final values: {len(result.outcome.preserved)}"
+            )
+        lines.append(
+            f"final-Place coordinate lookups: {result.place_lookups}  "
+            f"ambiguous places: {result.ambiguous_places}"
+        )
+        lines.append("")
+
+    totals = _totals(results)
+    lines.extend(
+        [
+            "Dictionary usage",
+            "----------------",
+            f"Dictionary entries loaded: people {len(dictionary.people)}, "
+            f"places {len(dictionary.places)}, tags {len(dictionary.tags)}",
+            f"People matched from catalog: {totals['people']}",
+            f"Places matched from catalog: {totals['places']}",
+            f"Tags matched from catalog: {totals['tags']}",
+            f"Places with reused coordinates: {totals['coordinates']}",
+            "",
+            "Learning candidates discovered",
+            "------------------------------",
+            f"People aliases: {totals['candidate_people']}",
+            f"Place aliases: {totals['candidate_places']}",
+            f"Tag aliases: {totals['candidate_tags']}",
+            f"LatLon candidates/conflicts: {totals['candidate_latlon']}",
+            "(candidates are hints only; confirmed dictionary state is unchanged)",
+        ]
+    )
+
+    if verbose:
+        examples = [item for result in results for item in result.candidates][:20]
+        if examples:
+            lines.append("")
+            lines.append("candidate examples:")
+            lines.extend(f"  - {item}" for item in examples)
+
+    return "\n".join(lines)
+
+
+def _totals(results) -> dict[str, int]:
+    totals = {
+        "people": 0, "places": 0, "tags": 0, "coordinates": 0,
+        "candidate_people": 0, "candidate_places": 0, "candidate_tags": 0,
+        "candidate_latlon": 0,
+    }
+    for result in results:
+        totals["people"] += result.people_matched
+        totals["places"] += result.places_matched
+        totals["tags"] += result.tags_matched
+        totals["coordinates"] += result.coordinates_reused
+        for candidate in result.candidates:
+            if candidate.startswith("person"):
+                totals["candidate_people"] += 1
+            elif candidate.startswith("place"):
+                totals["candidate_places"] += 1
+            elif candidate.startswith("tag"):
+                totals["candidate_tags"] += 1
+    return totals
+
+
+def render_learn_report(outcome) -> str:
+    """Report what a learn pass actually changed in the dictionary."""
+    return "\n".join(
+        [
+            "Dictionary updates",
+            "------------------",
+            f"New people: {len(outcome.new_people)}",
+            f"New places: {len(outcome.new_places)}",
+            f"New tags: {len(outcome.new_tags)}",
+            f"Confirmed aliases added: {len(outcome.confirmed_aliases)}",
+            f"Candidate aliases added: {len(outcome.candidate_aliases)}",
+            f"Candidates promoted to confirmed: {len(outcome.promoted)}",
+            f"LatLon added: {len(outcome.latlon_added)}",
+            f"LatLon conflicts: {len(outcome.latlon_conflicts)}",
+        ]
+    )
+
+
 def _render_entry(reconciled) -> list[str]:
     entry = reconciled.entry
     lines = [

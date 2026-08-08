@@ -14,3 +14,6 @@ credentials.json
 token.json
 *.log
 .DS_Store
+logs/
+review-output/
+review-output-backup-*/

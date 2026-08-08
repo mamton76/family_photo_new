@@ -26,6 +26,68 @@ the final photos.
 
 ## What works today
 
+**`scan --local-review` generates real `review.xlsx` workbooks** with embedded
+previews, machine suggestions and safe rescans, plus a `catalog.xlsx` view of
+the dictionaries. Everything is written locally; no Google service is contacted.
+
+```bash
+python app.py scan "https://disk.yandex.ru/d/<id>" --local-review
+python app.py scan "https://disk.yandex.ru/d/<id>" --local-review --output-dir ./out
+```
+
+### Suggested vs final metadata
+
+Every metadata field appears twice. `Suggested Date` is machine-owned and may
+be recomputed on any scan; `Date` is yours.
+
+- **On first creation only**, each final field is seeded from its suggestion.
+- **On every later scan**, suggestions are refreshed and final values are left
+  alone — even when a final value still equals the old suggestion. The pipeline
+  does not try to guess whether you edited it, because guessing wrong would
+  discard a deliberate decision.
+- The one exception is **`Map Link`**: pasting a Google Maps URL is an explicit
+  instruction, so it updates the final `LatLon`. A link that carries no
+  coordinates changes nothing and says so in `Review Reason`.
+
+### Safe rescans
+
+| What changed | What happens |
+|---|---|
+| Nothing | Row untouched; row order identical |
+| Description text | Source columns and suggestions refresh; row → `REVIEW` |
+| Description on an approved row | Same, but reason says *after approval*; final metadata kept |
+| Photo bytes | Preview refreshes; row → `REVIEW`, reason *Source photo changed* |
+| Photo disappears | Row → `SOURCE_MISSING`; row and final metadata kept |
+| Absent photo appears | **Same row reused**, never duplicated; reason *Previously absent photo found* |
+
+### Coordinates
+
+One combined text field everywhere: `55.712345, 37.623456` — latitude first,
+decimal degrees. Both coordinate cells are clickable Google Maps hyperlinks.
+
+### Dictionaries
+
+`People`, `Places` and `Tags` live in SQLite and are exported to
+`catalog.xlsx`, where **candidate** aliases and coordinates are shaded amber to
+keep them visibly distinct from **confirmed** knowledge. Matching prefers
+canonical names, then confirmed aliases, longest phrase first; candidates are
+hints and never become suggestions.
+
+**Suggestions never teach the dictionary — only approved, human-reviewed final
+metadata does.** Ambiguous mappings become candidates with evidence attached
+rather than confirmed facts, and kinship words like `мама` are never promoted
+to universal aliases. Confirmed place coordinates are never overwritten: a
+materially different proposal is stored as a conflict for a human to settle.
+
+### Diagnostic logs
+
+Every run writes a full `DEBUG` transcript to `./logs/run-<id>.log` — decisions
+per row, counts, HTTP calls and stack traces — whatever the console verbosity.
+The path is printed at the end of each run, and the file is self-contained
+enough to hand to someone (or something) for diagnosis. Use `--log-dir` to
+change where it goes.
+
+
 **`scan --dry-run` against a public Yandex Disk folder.** It reads the real
 archive over the official public-resources API and prints what a scan would
 do — resolved root name, discovered folders and files, photo-containing

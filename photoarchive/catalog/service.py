@@ -1,128 +1,227 @@
-"""The global ``catalog.xlsx`` knowledge base.
+"""The global ``catalog.xlsx``: the dictionaries in human-readable form.
 
-The catalog lives at the Google Drive archive root (one per archive, not one
-per folder) and holds three sheets:
+SQLite is where the dictionaries live; this workbook is the view a person
+opens. It carries three sheets — ``People``, ``Places`` and ``Tags`` — and its
+job is to make one distinction impossible to miss:
 
-* **People** — stable id, canonical display name, aliases, relationship notes,
-  default Google Photos album. Ambiguous aliases such as ``mom`` must be
-  confirmed by a human before they resolve to a person.
-* **Places** — stable id, canonical name, historical/display names, aliases,
-  latitude, longitude, geographic precision, confirmation status.
-* **Tags** — a *controlled* vocabulary (``school``, ``dacha``, ``birthday``,
-  ``travel``, ``New Year``), not every noun found in a description.
+* **CONFIRMED** knowledge the pipeline may act on;
+* **CANDIDATE** knowledge that is only a hint, shaded amber and never used for
+  a suggestion until a human promotes it.
 
-It is populated from **approved** review rows, after human correction — the
-``learn`` command — and then feeds better proposals for the next folder. The
-first scan works fine with an empty or absent catalog.
+Each row also shows how much evidence stands behind it, so "why does the system
+think this?" is answerable without opening the database.
+
+In this milestone the workbook is written, not read back: SQLite remains the
+source of truth, and promoting a candidate is a deliberate action rather than
+an Excel edit.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
-from photoarchive.models import PhotoReviewRecord
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+
+from photoarchive.catalog.models import ConfidenceStatus, Dictionary, EntityType
+from photoarchive.catalog.store import DictionaryStore
+
+CATALOG_FILENAME = "catalog.xlsx"
 
 CATALOG_SHEETS: tuple[str, ...] = ("People", "Places", "Tags")
 
 PEOPLE_COLUMNS: tuple[str, ...] = (
     "person_id",
-    "display_name",
-    "aliases",
-    "relationship",
-    "default_album",
+    "canonical_name",
+    "confirmed_aliases",
+    "candidate_aliases",
+    "evidence_count",
     "notes",
 )
 
 PLACES_COLUMNS: tuple[str, ...] = (
     "place_id",
-    "canonical_name",
-    "historical_names",
-    "aliases",
-    "latitude",
-    "longitude",
-    "precision",
-    "confirmed",
+    "canonical_place",
+    "confirmed_aliases",
+    "candidate_aliases",
+    "latlon",
+    "candidate_latlon",
+    "map_link",
+    "evidence_count",
+    "notes",
 )
 
-TAGS_COLUMNS: tuple[str, ...] = ("tag", "aliases", "notes")
+TAGS_COLUMNS: tuple[str, ...] = (
+    "tag_id",
+    "canonical_tag",
+    "confirmed_aliases",
+    "candidate_aliases",
+    "evidence_count",
+    "notes",
+)
+
+_HEADER_FILL = PatternFill("solid", fgColor="DDE5F0")
+#: Amber: this cell holds a hint, not a fact.
+_CANDIDATE_FILL = PatternFill("solid", fgColor="FFF2CC")
+
+_LIST_SEPARATOR = "; "
+
+_CANDIDATE_COLUMNS = frozenset({"candidate_aliases", "candidate_latlon"})
 
 
 @dataclass(frozen=True, slots=True)
-class Person:
-    person_id: str
-    display_name: str
-    aliases: tuple[str, ...] = ()
-    relationship: str | None = None
-    default_album: str | None = None
-    notes: str | None = None
+class CatalogCounts:
+    """Summary of what was exported."""
 
-
-@dataclass(frozen=True, slots=True)
-class Place:
-    place_id: str
-    canonical_name: str
-    historical_names: tuple[str, ...] = ()
-    aliases: tuple[str, ...] = ()
-    latitude: float | None = None
-    longitude: float | None = None
-    precision: str | None = None
-    confirmed: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class Tag:
-    tag: str
-    aliases: tuple[str, ...] = ()
-    notes: str | None = None
-
-
-@dataclass(slots=True)
-class Catalog:
-    """In-memory view of the catalog, used as proposal context."""
-
-    people: list[Person] = field(default_factory=list)
-    places: list[Place] = field(default_factory=list)
-    tags: list[Tag] = field(default_factory=list)
-
-    @property
-    def is_empty(self) -> bool:
-        return not (self.people or self.places or self.tags)
+    people: int = 0
+    places: int = 0
+    tags: int = 0
+    candidate_aliases: int = 0
+    candidate_coordinates: int = 0
 
 
 class CatalogService:
-    """Loads and grows the archive-wide catalog.
+    """Exports the dictionaries to ``catalog.xlsx``."""
 
-    Like the review service, this works on a local copy; upload and download
-    are the caller's job.
-    """
-
-    def __init__(self, filename: str = "catalog.xlsx") -> None:
+    def __init__(self, filename: str = CATALOG_FILENAME) -> None:
         self.filename = filename
 
-    def load(self, path: Path) -> Catalog:
-        """Read the catalog workbook.
+    def export(
+        self, store: DictionaryStore, output_dir: Path
+    ) -> tuple[Path, CatalogCounts]:
+        """Write ``catalog.xlsx`` and report what it contains."""
+        dictionary = store.load()
+        path = Path(output_dir) / self.filename
+        path.parent.mkdir(parents=True, exist_ok=True)
 
-        Returns an empty catalog when the file does not exist yet: the first
-        scan must not require a populated catalog.
+        workbook = Workbook()
+        workbook.remove(workbook.active)
 
-        TODO: implement with openpyxl over ``CATALOG_SHEETS``.
-        """
-        raise NotImplementedError("CatalogService.load is not implemented yet")
+        counts = CatalogCounts(
+            people=len(dictionary.people),
+            places=len(dictionary.places),
+            tags=len(dictionary.tags),
+            candidate_aliases=_count_candidate_aliases(dictionary),
+            candidate_coordinates=sum(
+                len(place.candidate_latlon) for place in dictionary.places
+            ),
+        )
 
-    def learn(self, catalog: Catalog, approved: list[PhotoReviewRecord]) -> Catalog:
-        """Fold approved review rows into the catalog.
+        self._write_people(workbook, store, dictionary)
+        self._write_places(workbook, store, dictionary)
+        self._write_tags(workbook, store, dictionary)
 
-        TODO: only ``APPROVED`` rows contribute; new people/places/tags are
-        added with stable ids, and ambiguous aliases are flagged for
-        confirmation instead of being merged automatically.
-        """
-        raise NotImplementedError("CatalogService.learn is not implemented yet")
+        workbook.save(path)
+        workbook.close()
+        return path, counts
 
-    def save(self, catalog: Catalog, path: Path) -> Path:
-        """Write the catalog workbook back out.
+    def _write_people(self, workbook, store, dictionary: Dictionary) -> None:
+        sheet = workbook.create_sheet("People")
+        _write_header(sheet, PEOPLE_COLUMNS)
+        for index, person in enumerate(dictionary.people, start=2):
+            _write_row(
+                sheet,
+                index,
+                PEOPLE_COLUMNS,
+                {
+                    "person_id": person.person_id,
+                    "canonical_name": person.canonical_name,
+                    "confirmed_aliases": _join(person.confirmed_aliases),
+                    "candidate_aliases": _join(person.candidate_aliases),
+                    "evidence_count": store.evidence_count(
+                        EntityType.PERSON, person.canonical_name
+                    ),
+                    "notes": person.notes or "",
+                },
+            )
+        _size(sheet, PEOPLE_COLUMNS)
 
-        TODO: implement with openpyxl, preserving sheets and columns this code
-        does not know about.
-        """
-        raise NotImplementedError("CatalogService.save is not implemented yet")
+    def _write_places(self, workbook, store, dictionary: Dictionary) -> None:
+        sheet = workbook.create_sheet("Places")
+        _write_header(sheet, PLACES_COLUMNS)
+        for index, place in enumerate(dictionary.places, start=2):
+            _write_row(
+                sheet,
+                index,
+                PLACES_COLUMNS,
+                {
+                    "place_id": place.place_id,
+                    "canonical_place": place.canonical_place,
+                    "confirmed_aliases": _join(place.confirmed_aliases),
+                    "candidate_aliases": _join(place.candidate_aliases),
+                    "latlon": place.latlon.format() if place.latlon else "",
+                    "candidate_latlon": _join(
+                        point.format() for point in place.candidate_latlon
+                    ),
+                    "map_link": place.map_link or "",
+                    "evidence_count": store.evidence_count(
+                        EntityType.PLACE, place.canonical_place
+                    ),
+                    "notes": place.notes or "",
+                },
+            )
+        _size(sheet, PLACES_COLUMNS)
+
+    def _write_tags(self, workbook, store, dictionary: Dictionary) -> None:
+        sheet = workbook.create_sheet("Tags")
+        _write_header(sheet, TAGS_COLUMNS)
+        for index, tag in enumerate(dictionary.tags, start=2):
+            _write_row(
+                sheet,
+                index,
+                TAGS_COLUMNS,
+                {
+                    "tag_id": tag.tag_id,
+                    "canonical_tag": tag.canonical_tag,
+                    "confirmed_aliases": _join(tag.confirmed_aliases),
+                    "candidate_aliases": _join(tag.candidate_aliases),
+                    "evidence_count": store.evidence_count(
+                        EntityType.TAG, tag.canonical_tag
+                    ),
+                    "notes": tag.notes or "",
+                },
+            )
+        _size(sheet, TAGS_COLUMNS)
+
+
+def _join(values) -> str:
+    """Render a list field as a semicolon-separated cell value."""
+    return _LIST_SEPARATOR.join(str(value) for value in values if value)
+
+
+def _count_candidate_aliases(dictionary: Dictionary) -> int:
+    total = sum(len(person.candidate_aliases) for person in dictionary.people)
+    total += sum(len(place.candidate_aliases) for place in dictionary.places)
+    total += sum(len(tag.candidate_aliases) for tag in dictionary.tags)
+    return total
+
+
+def _write_header(sheet, columns: tuple[str, ...]) -> None:
+    for index, name in enumerate(columns, start=1):
+        cell = sheet.cell(row=1, column=index, value=name)
+        cell.font = Font(bold=True)
+        cell.fill = _HEADER_FILL
+    sheet.freeze_panes = "A2"
+
+
+def _write_row(sheet, row_index: int, columns: tuple[str, ...], values: dict) -> None:
+    for index, name in enumerate(columns, start=1):
+        cell = sheet.cell(row=row_index, column=index, value=values.get(name, ""))
+        cell.alignment = Alignment(vertical="top", wrap_text=True)
+        # Shade candidate cells that actually hold something, so a reviewer
+        # can never mistake a hint for confirmed knowledge.
+        if name in _CANDIDATE_COLUMNS and values.get(name):
+            cell.fill = _CANDIDATE_FILL
+
+
+def _size(sheet, columns: tuple[str, ...]) -> None:
+    for index, name in enumerate(columns, start=1):
+        width = 40 if "alias" in name or "latlon" in name else 22
+        sheet.column_dimensions[get_column_letter(index)].width = width
+
+
+def status_label(status: ConfidenceStatus) -> str:
+    """Human label for a confidence status."""
+    return status.value

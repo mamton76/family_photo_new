@@ -93,8 +93,26 @@ CREATE TABLE IF NOT EXISTS processed_items (
     UNIQUE (source_item_id)
 );
 
+-- Per-row bookkeeping for review workbooks. Deliberately not workbook
+-- columns: this is the pipeline's memory, not something a reviewer edits.
+CREATE TABLE IF NOT EXISTS review_rows (
+    id               INTEGER PRIMARY KEY,
+    root_identity    TEXT NOT NULL,
+    folder_path      TEXT NOT NULL,
+    identity         TEXT NOT NULL,
+    photo_hash       TEXT,
+    description_hash TEXT,
+    suggestion_hash  TEXT,
+    status           TEXT,
+    was_absent       INTEGER NOT NULL DEFAULT 0,
+    last_scan        TEXT,
+    UNIQUE (root_identity, folder_path, identity)
+);
+
 CREATE INDEX IF NOT EXISTS idx_source_items_root ON source_items(root_id);
 CREATE INDEX IF NOT EXISTS idx_source_items_hash ON source_items(content_hash);
+CREATE INDEX IF NOT EXISTS idx_review_rows_folder
+    ON review_rows(root_identity, folder_path);
 """
 
 
@@ -182,3 +200,58 @@ class StateRepository:
 
     def mark_published(self, source_item_id: int, media_id: str) -> None:
         raise NotImplementedError("mark_published is not implemented yet")
+
+    # -- Review row bookkeeping -------------------------------------------
+
+    def load_row_states(self, root_identity: str, folder_path: str) -> dict[str, object]:
+        """Return the stored state of every row in one folder, by identity."""
+        from photoarchive.review.builder import RowState
+
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM review_rows WHERE root_identity = ? AND folder_path = ?",
+                (root_identity, folder_path),
+            ).fetchall()
+
+        return {
+            row["identity"]: RowState(
+                identity=row["identity"],
+                photo_hash=row["photo_hash"] or "",
+                description_hash=row["description_hash"] or "",
+                suggestion_hash=row["suggestion_hash"] or "",
+                status=row["status"] or "",
+                was_absent=bool(row["was_absent"]),
+            )
+            for row in rows
+        }
+
+    def save_row_states(
+        self, root_identity: str, folder_path: str, states: dict[str, object]
+    ) -> None:
+        """Persist row bookkeeping after a scan."""
+        timestamp = utc_now().isoformat()
+        with self.connect() as connection:
+            for identity, state in states.items():
+                connection.execute(
+                    "INSERT INTO review_rows (root_identity, folder_path, identity,"
+                    " photo_hash, description_hash, suggestion_hash, status, was_absent,"
+                    " last_scan) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    " ON CONFLICT (root_identity, folder_path, identity) DO UPDATE SET"
+                    " photo_hash = excluded.photo_hash,"
+                    " description_hash = excluded.description_hash,"
+                    " suggestion_hash = excluded.suggestion_hash,"
+                    " status = excluded.status,"
+                    " was_absent = excluded.was_absent,"
+                    " last_scan = excluded.last_scan",
+                    (
+                        root_identity,
+                        folder_path,
+                        identity,
+                        state.photo_hash,
+                        state.description_hash,
+                        state.suggestion_hash,
+                        state.status,
+                        int(state.was_absent),
+                        timestamp,
+                    ),
+                )

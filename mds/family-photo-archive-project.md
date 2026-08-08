@@ -145,40 +145,142 @@ Values inferred from path context must be marked as inferred and require review.
 
 ## `review.xlsx`
 
-Visible columns:
+One workbook per folder that directly contains photos, generated locally by
+`scan --local-review`.
 
-| Column | Purpose |
-|---|---|
-| Preview | Embedded thumbnail |
-| Filename | Original filename |
-| Source Description | Source text associated with the photo |
-| Date | Reviewed date |
-| Date Precision | `exact`, `month`, `season`, `year`, `unknown` |
-| Place | Human-readable place |
-| Latitude | GPS latitude |
-| Longitude | GPS longitude |
-| People | Semicolon-separated reviewed people |
-| Tags | Semicolon-separated controlled tags |
-| Event | Optional event name |
-| Albums | Google Photos album names |
-| Description | Final human-readable description |
-| Status | Workflow status |
-| Notes | Human notes |
+Every metadata field appears twice: a machine-owned `Suggested …` column and
+the user-owned final column it seeds.
 
-Hidden technical columns:
+Visible columns, in order:
 
 ```text
-source_id
-source_path
-source_hash
-description_hash
-metadata_hash
-processed_hash
-google_photos_media_id
-last_scan
+Preview
+Filename / Reference
+Source Description
+Section Context
+Source Notes
+Suggested Date
+Date
+Suggested Place
+Place
+Suggested LatLon
+LatLon
+Map Link
+Suggested People
+People
+Suggested Tags
+Tags
+Event
+Albums
+Description
+Status
+Review Reason
+Notes
 ```
 
-Statuses:
+There are no precision columns. Bookkeeping (hashes, previous status, row
+identity) lives in `archive.sqlite`, not in hidden workbook columns.
+
+### Suggested vs final semantics
+
+- On **first creation**, each final field is seeded from its suggestion.
+- On **every later scan**, suggestions are recomputed freely, and a **non-empty**
+  final value is never overwritten.
+- A **blank** final field may be filled from the current suggestion. This is how
+  dictionary knowledge propagates once `learn` has taught it.
+
+```text
+final non-empty                      -> preserve exactly
+final empty AND suggestion non-empty -> copy suggestion into final
+```
+
+`Map Link` is the explicit exception: a parsable Google Maps URL pasted by a
+reviewer may update the final `LatLon`, because pasting it is an instruction.
+An unparsable link changes nothing and says so in `Review Reason`.
+
+### Source columns
+
+- **Section Context** — the inherited `Далее …` heading, kept apart from the
+  photo's own description and never merged into it.
+- **Source Notes** — verbatim notes lifted out of the description, such as
+  `нет фото`, which means the paper original has been lost, *not* that the
+  digital file is missing.
+- **Review Reason** — why a row needs another look: `Description changed`,
+  `Description changed after approval`, `Source photo changed`,
+  `Previously absent photo found`, or a `Map Link` outcome.
+
+### Place and LatLon are one linked concept
+
+`LatLon` is **not** an independent dictionary concept. Coordinates are an
+attribute of a canonical Place, so learning a coordinate always enriches a
+Place entity, and any row naming a known Place can receive that Place's
+coordinates.
+
+One combined text field carries them everywhere:
+
+```text
+55.751244, 37.618423
+```
+
+Latitude first, decimal degrees, `.` decimal separator, `, ` delimiter, stored
+as text. Both `Suggested LatLon` and `LatLon` are clickable Google Maps
+hyperlinks; they are never split back into separate latitude/longitude columns.
+
+There are **two routes** by which a row gets coordinates:
+
+```text
+A.  source text -> confirmed Place -> Suggested Place -> Suggested LatLon
+B.  existing final Place -> confirmed Place -> Suggested LatLon
+```
+
+**Route B matters most.** A folder with no DOCX has no source text to match, so
+the only thing identifying the location is the `Place` a reviewer typed. That
+value is resolved against the dictionary — exact canonical, then confirmed
+alias, then the same compared normalized — and the resolved Place's confirmed
+coordinates become `Suggested LatLon`. The blank-fill rule then decides whether
+they reach `LatLon`.
+
+### What `Suggested Place` means
+
+`Suggested Place` is **the system's current canonical interpretation of the
+place** — not merely "what the source-text parser extracted". It may be filled
+either by matching the description or by resolving the `Place` a reviewer
+already typed.
+
+That is deliberate: seeing the canonical name beside their own wording is how a
+reviewer can tell at a glance that their spelling is being recognised, and
+through which confirmed alias.
+
+```text
+Suggested Place: Дома на Днепропетровской    <- canonical interpretation
+Place:           Дом на Днепропетровской     <- exactly what was typed
+```
+
+The reviewer's own `Place` spelling is **never** rewritten to the canonical
+form. `Suggested Place` is machine-owned; `Place` is user-owned once non-empty.
+
+A **confirmed** alias may therefore produce a canonical `Suggested Place` with
+no DOCX present at all, and that canonical Place then supplies
+`Suggested LatLon`. **Candidate** aliases produce neither. An ambiguous value
+picks no canonical Place silently.
+
+Candidate aliases and candidate coordinates never supply values this way. If a
+place value resolves to two different confirmed Places, both `Suggested Place`
+and `Suggested LatLon` stay empty and the ambiguity is reported.
+
+### Map Link, end to end
+
+```text
+one row:  Place = Днепропетровская, Москва
+          Map Link = <Google Maps URL>
+    -> parsed into that row's final LatLon
+    -> learn stores it on the Place
+    -> rescan gives every other row using that Place the same coordinates
+```
+
+So a single manually placed map point can locate an entire group of photos.
+
+### Statuses
 
 ```text
 NEW
@@ -188,9 +290,116 @@ BUILT
 PUBLISHED
 SOURCE_CHANGED
 SOURCE_MISSING
+DESCRIBED_ABSENT
 ERROR
 SKIP
 ```
+
+`DESCRIBED_ABSENT` means the folder's DOCX describes a photo that is not in
+this folder. The row exists with no preview and keeps its description, so the
+photo can be looked for later. It is distinct from `SOURCE_MISSING`, which
+means a photo the pipeline saw before has since disappeared.
+
+### Row identity
+
+A row is identified by source root + relative folder + reference stem. The
+stem alone is not an identity: `folder A/001.jpg` and `folder B/001.jpg` are
+different photos. Within one folder, `20200512_150442` and
+`20200512_150442.jpg` are the same row, so a `DESCRIBED_ABSENT` row is reused
+when its photo appears rather than duplicated.
+
+## Description Documents
+
+Only `.docx` is parsed. Exactly one per folder is required: zero means no
+description, and several is a conflict where none is chosen automatically.
+`.rtf`, `.txt`, `.doc` and `.pdf` are reported in diagnostics but never parsed.
+This rule is not configurable.
+
+A new description entry starts at a paragraph beginning with a photo
+reference; following paragraphs belong to it.
+
+## Dictionaries and `catalog.xlsx`
+
+`People`, `Places` and `Tags` live in `archive.sqlite` and are exported to an
+**editable** `catalog.xlsx` with one sheet each.
+
+### Confirmed vs candidate
+
+- **CONFIRMED** knowledge may drive suggestions.
+- **CANDIDATE** knowledge is a hint only, shaded amber in the workbook, and
+  never becomes a suggestion until a human promotes it.
+
+Every alias and coordinate carries **evidence**: where it came from, which row,
+which description, and why. Evidence is append-only and survives promotion, so
+"why does the system think this?" is always answerable. Each catalog row shows
+an `evidence_count`.
+
+### Learning
+
+**Suggestions never teach the dictionary. Human-entered final values do.**
+Only the user-owned `People`, `Place`, `LatLon` and `Tags` columns are read.
+
+`APPROVED` is *not* required — it is a publication state, and a name typed on a
+row still in `REVIEW` is just as much a stated fact. Only `ERROR` and `SKIP`
+rows are ignored. This lets the dictionaries bootstrap while review is still in
+progress.
+
+Ambiguous mappings become candidates with evidence rather than confirmed
+aliases, and context-dependent kinship words (`мама`, `папа`, …) are never
+promoted to universal aliases. Confirmed place coordinates are never
+overwritten: a materially different proposal becomes a conflict for a human.
+
+If several distinct confirmed places match one description, `Suggested Place`
+and `Suggested LatLon` are both left empty rather than guessing.
+
+### `catalog.xlsx` is bidirectional
+
+The workbook is read back before every `learn` and used by every `scan`:
+
+```text
+load SQLite
+    -> import and validate catalog.xlsx edits
+    -> sync valid edits into SQLite
+    -> learn or scan
+    -> write refreshed catalog.xlsx
+```
+
+Stable `person_id` / `place_id` / `tag_id` columns mean renaming a canonical
+value edits that entity instead of creating a duplicate.
+
+**Merging duplicates.** Two rows that turn out to name the same thing are
+merged by adding the duplicate's canonical value to the survivor's
+`confirmed_aliases` and deleting the duplicate row. On import that is treated
+as an intentional merge: aliases and evidence are re-pointed rather than
+dropped, coordinates are adopted if the survivor had none, conflicting
+coordinates become a conflict rather than a silent overwrite, and the duplicate
+is removed.
+
+**A merge stays merged.** Learning resolves a value through confirmed aliases
+before creating anything, so a review row still carrying the old spelling
+resolves to the surviving entity instead of recreating the duplicate. The
+resolution order is: stable id, exact canonical, confirmed alias, normalized
+match, and only then a new canonical entity. Candidates never resolve and never
+block creation. Moving an alias from
+`candidate_aliases` to `confirmed_aliases` promotes it; typing coordinates into
+`latlon` confirms them. Invalid edits are reported and skipped, and never
+destroy the last known-good confirmed value.
+
+## The Iterative Loop
+
+```text
+review.xlsx
+    -> learn from human-entered final values
+    -> SQLite dictionaries  <->  editable catalog.xlsx
+    -> rescan
+    -> dictionary-backed Suggested fields
+    -> fill only still-empty final fields
+    -> more manual edits
+    -> learn again
+```
+
+Safely repeatable: repeated unchanged runs add no entities, aliases, candidates
+or evidence, and never overwrite a non-empty final value.
 
 ## Human Edits Are Authoritative
 
@@ -203,79 +412,6 @@ Rules:
 - changed description -> preserve reviewed values and surface the new source text;
 - missing source photo -> mark `SOURCE_MISSING`;
 - unchanged source -> leave reviewed row untouched.
-
-## Global `catalog.xlsx`
-
-`catalog.xlsx` lives in the Google Drive archive root and grows from reviewed data.
-
-Suggested sheets:
-
-### People
-
-Fields may include:
-
-- stable person ID;
-- canonical display name;
-- aliases;
-- relationship/context notes;
-- default Google Photos album name.
-
-Ambiguous aliases such as `mom` must require confirmation.
-
-### Places
-
-Fields may include:
-
-- stable place ID;
-- canonical place name;
-- historical/display names;
-- aliases;
-- latitude;
-- longitude;
-- geographic precision;
-- confirmation status.
-
-### Tags
-
-Use a controlled vocabulary rather than extracting every noun.
-
-Examples:
-
-```text
-school
-dacha
-birthday
-travel
-New Year
-```
-
-## Learning Workflow
-
-The catalog is populated **after** human correction.
-
-Conceptual command:
-
-```bash
-python app.py learn
-```
-
-The feedback loop is:
-
-```text
-source descriptions
-        ↓
-automatic proposals
-        ↓
-review.xlsx
-        ↓
-human corrections
-        ↓
-APPROVED
-        ↓
-catalog.xlsx
-        ↓
-better proposals for the next folder
-```
 
 ## Metadata Output
 
@@ -348,56 +484,17 @@ Do not use filenames alone as immutable identity.
 
 ## CLI
 
-Planned commands:
-
 ```bash
-python app.py scan "<yandex-folder-url>"
-python app.py learn
-python app.py build
-python app.py publish
+python app.py scan "<yandex-public-url>" --dry-run       # inspect, writes nothing
+python app.py scan "<yandex-public-url>" --local-review   # generate review.xlsx
+python app.py learn                                       # learn from review-output
+python app.py learn --dry-run                             # propose without writing
+python app.py build                                       # not implemented
+python app.py publish                                     # not implemented
 ```
 
-### `scan`
-
-Current MVP:
-
-- recursively inspect one supplied Yandex root;
-- preserve nested relative paths;
-- detect photo-containing folders;
-- locate same-folder description files;
-- associate description fragments with photos;
-- use folder/path context for metadata proposals;
-- create/update destination folders on Google Drive;
-- create/update `review.xlsx`;
-- embed previews;
-- preserve human edits;
-- detect new, changed, and missing source files.
-
-### `learn`
-
-Future:
-
-- read approved review rows;
-- update `catalog.xlsx`;
-- flag ambiguous aliases.
-
-### `build`
-
-Future:
-
-- obtain original source image;
-- create processed copy;
-- write reviewed EXIF/IPTC/XMP;
-- upload processed copy to Google Drive.
-
-### `publish`
-
-Future:
-
-- upload new/changed built files to Google Photos;
-- create/reuse application-managed albums;
-- add photos to albums;
-- persist Google Photos IDs.
+`learn` reads `./review-output` by default; `--source` points it elsewhere.
+Every run writes a full DEBUG transcript to `./logs/run-<id>.log`.
 
 ## Proposed Python Stack
 

@@ -1,0 +1,318 @@
+"""Rescan semantics: what a scan may rewrite and what it must never touch."""
+
+from __future__ import annotations
+
+from photoarchive.models import RemoteSourceItem, WorkflowStatus
+from photoarchive.parsing.descriptions import (
+    DescriptionEntry,
+    ReconciledEntry,
+    Reconciliation,
+)
+from photoarchive.parsing.suggestions import Suggestion
+from photoarchive.review.builder import build_rows
+from photoarchive.review.model import (
+    REASON_DESCRIPTION_CHANGED,
+    REASON_DESCRIPTION_CHANGED_AFTER_APPROVAL,
+    REASON_PREVIOUSLY_ABSENT_FOUND,
+    REASON_SOURCE_PHOTO_CHANGED,
+)
+
+
+def _photo(name: str) -> RemoteSourceItem:
+    return RemoteSourceItem(name=name, relative_path=name, is_directory=False)
+
+
+def _entry(reference: str, text: str = "описание", section: str | None = None):
+    return DescriptionEntry(
+        reference=reference, paragraphs=(text,), text=text, section_context=section
+    )
+
+
+def _reconciliation(*pairs, undescribed=()) -> Reconciliation:
+    return Reconciliation(
+        entries=tuple(ReconciledEntry(entry=entry, photo=photo) for entry, photo in pairs),
+        undescribed_photos=tuple(undescribed),
+    )
+
+
+SUGGESTION = Suggestion(
+    date="1979", place="Дача", latlon="55.700000, 37.600000",
+    people=("Антонина Мамаева",), tags=("дача",),
+)
+
+
+def _first_scan(reference="020", text="описание", photo=True, suggestion=SUGGESTION):
+    reconciliation = _reconciliation((_entry(reference, text), _photo("020.jpg") if photo else None))
+    return build_rows(reconciliation, {reference: suggestion})
+
+
+# -- First creation -------------------------------------------------------
+
+
+def test_new_row_copies_suggestions_into_final_fields() -> None:
+    outcome, _ = _first_scan()
+    row = outcome.rows[0]
+
+    assert row.date == "1979"
+    assert row.place == "Дача"
+    assert row.latlon == "55.700000, 37.600000"
+    assert row.people == "Антонина Мамаева"
+    assert row.tags == "дача"
+    assert outcome.created == ["020"]
+
+
+def test_new_present_row_starts_as_new() -> None:
+    outcome, _ = _first_scan()
+
+    assert outcome.rows[0].status is WorkflowStatus.NEW
+
+
+def test_new_absent_row_starts_as_described_absent() -> None:
+    outcome, _ = _first_scan(photo=False)
+
+    assert outcome.rows[0].status is WorkflowStatus.DESCRIBED_ABSENT
+    assert outcome.rows[0].filename == ""
+
+
+# -- Rescan preserves user-owned fields -----------------------------------
+
+
+def test_rescan_preserves_manually_changed_final_fields() -> None:
+    outcome, states = _first_scan()
+    row = outcome.rows[0]
+    row.date = "1981"
+    row.people = "Аня Архангельская"
+    existing = {"020": row}
+
+    new_suggestion = Suggestion(date="1990", people=("Кто-то Другой",))
+    rescan, _ = build_rows(
+        _reconciliation((_entry("020"), _photo("020.jpg"))),
+        {"020": new_suggestion},
+        existing=existing,
+        states=states,
+    )
+
+    updated = rescan.rows[0]
+    assert updated.date == "1981"
+    assert updated.people == "Аня Архангельская"
+    # Suggestions are machine-owned and do get refreshed.
+    assert updated.suggested_date == "1990"
+    assert updated.suggested_people == "Кто-то Другой"
+
+
+def test_rescan_preserves_final_fields_even_when_they_equal_old_suggestions() -> None:
+    # The reviewer may have deliberately kept the suggested value. The pipeline
+    # cannot tell, so it must not overwrite either way.
+    outcome, states = _first_scan()
+    existing = {"020": outcome.rows[0]}
+
+    rescan, _ = build_rows(
+        _reconciliation((_entry("020"), _photo("020.jpg"))),
+        {"020": Suggestion(date="1990", place="Другое место")},
+        existing=existing,
+        states=states,
+    )
+
+    assert rescan.rows[0].date == "1979"
+    assert rescan.rows[0].place == "Дача"
+
+
+def test_changed_description_updates_suggestions_but_not_finals() -> None:
+    outcome, states = _first_scan(text="старое описание")
+    existing = {"020": outcome.rows[0]}
+
+    rescan, _ = build_rows(
+        _reconciliation((_entry("020", "новое описание"), _photo("020.jpg"))),
+        {"020": Suggestion(date="1985")},
+        existing=existing,
+        states=states,
+    )
+
+    row = rescan.rows[0]
+    assert row.source_description == "новое описание"
+    assert row.suggested_date == "1985"
+    assert row.date == "1979"
+    assert row.status is WorkflowStatus.REVIEW
+    assert row.review_reason == REASON_DESCRIPTION_CHANGED
+    assert rescan.description_changed == ["020"]
+
+
+def test_approved_row_returns_to_review_without_losing_final_metadata() -> None:
+    outcome, states = _first_scan(text="старое описание")
+    row = outcome.rows[0]
+    row.status = WorkflowStatus.APPROVED
+    row.date = "1979-06-01"
+    states["020"].status = WorkflowStatus.APPROVED.value
+
+    rescan, _ = build_rows(
+        _reconciliation((_entry("020", "новое описание"), _photo("020.jpg"))),
+        {"020": SUGGESTION},
+        existing={"020": row},
+        states=states,
+    )
+
+    updated = rescan.rows[0]
+    assert updated.status is WorkflowStatus.REVIEW
+    assert updated.review_reason == REASON_DESCRIPTION_CHANGED_AFTER_APPROVAL
+    assert updated.date == "1979-06-01"
+
+
+def test_unchanged_description_changes_nothing() -> None:
+    outcome, states = _first_scan()
+    existing = {"020": outcome.rows[0]}
+
+    rescan, _ = build_rows(
+        _reconciliation((_entry("020"), _photo("020.jpg"))),
+        {"020": SUGGESTION},
+        existing=existing,
+        states=states,
+    )
+
+    assert rescan.unchanged == ["020"]
+    assert rescan.description_changed == []
+    assert rescan.rows[0].review_reason == ""
+
+
+# -- Photo changes --------------------------------------------------------
+
+
+def test_changed_image_hash_returns_the_row_to_review() -> None:
+    reconciliation = _reconciliation((_entry("020"), _photo("020.jpg")))
+    outcome, states = build_rows(
+        reconciliation, {"020": SUGGESTION}, photo_hashes={"020": "hash-one"}
+    )
+    outcome.rows[0].date = "1981"
+
+    rescan, _ = build_rows(
+        reconciliation,
+        {"020": SUGGESTION},
+        existing={"020": outcome.rows[0]},
+        states=states,
+        photo_hashes={"020": "hash-two"},
+    )
+
+    row = rescan.rows[0]
+    assert row.status is WorkflowStatus.REVIEW
+    assert row.review_reason == REASON_SOURCE_PHOTO_CHANGED
+    assert row.date == "1981"
+    assert rescan.photo_changed == ["020"]
+
+
+def test_missing_photo_keeps_the_row_and_final_metadata() -> None:
+    outcome, states = _first_scan()
+    outcome.rows[0].date = "1981"
+
+    rescan, _ = build_rows(
+        _reconciliation(),
+        {},
+        existing={"020": outcome.rows[0]},
+        states=states,
+    )
+
+    assert len(rescan.rows) == 1
+    assert rescan.rows[0].status is WorkflowStatus.SOURCE_MISSING
+    assert rescan.rows[0].date == "1981"
+    assert rescan.went_missing == ["020"]
+
+
+# -- Absent becoming present ----------------------------------------------
+
+
+def test_absent_row_that_becomes_present_reuses_the_same_row() -> None:
+    outcome, states = _first_scan(photo=False)
+    row = outcome.rows[0]
+    row.date = "1979-02-19"
+    assert row.status is WorkflowStatus.DESCRIBED_ABSENT
+
+    rescan, _ = build_rows(
+        _reconciliation((_entry("020"), _photo("020.jpg"))),
+        {"020": SUGGESTION},
+        existing={"020": row},
+        states=states,
+    )
+
+    assert len(rescan.rows) == 1
+    updated = rescan.rows[0]
+    assert updated.status is WorkflowStatus.REVIEW
+    assert updated.review_reason == REASON_PREVIOUSLY_ABSENT_FOUND
+    assert updated.filename == "020.jpg"
+    assert updated.date == "1979-02-19"
+    assert rescan.became_present == ["020"]
+
+
+def test_reference_and_filename_share_one_identity() -> None:
+    # "020" described and "020.jpg" present must never become two rows.
+    outcome, _ = build_rows(
+        _reconciliation((_entry("020"), _photo("020.jpg"))), {"020": Suggestion()}
+    )
+
+    assert len(outcome.rows) == 1
+
+
+# -- Ordering and undescribed photos --------------------------------------
+
+
+def test_undescribed_photos_get_rows_after_described_entries() -> None:
+    reconciliation = _reconciliation(
+        (_entry("020"), _photo("020.jpg")), undescribed=[_photo("099.jpg")]
+    )
+
+    outcome, _ = build_rows(reconciliation, {})
+
+    assert [row.reference for row in outcome.rows] == ["020", "099"]
+    assert outcome.rows[1].filename == "099.jpg"
+
+
+def test_row_order_is_stable_across_unchanged_rescans() -> None:
+    reconciliation = _reconciliation(
+        (_entry("021"), _photo("021.jpg")),
+        (_entry("020"), _photo("020.jpg")),
+        undescribed=[_photo("099.jpg")],
+    )
+    first, states = build_rows(reconciliation, {})
+    existing = {row.reference: row for row in first.rows}
+
+    second, _ = build_rows(reconciliation, {}, existing=existing, states=states)
+
+    assert [row.reference for row in first.rows] == [row.reference for row in second.rows]
+
+
+# -- Map Link -------------------------------------------------------------
+
+
+def test_parsable_map_link_updates_final_latlon() -> None:
+    outcome, states = _first_scan()
+    row = outcome.rows[0]
+    row.map_link = "https://www.google.com/maps/@59.934280,30.335099,15z"
+
+    rescan, _ = build_rows(
+        _reconciliation((_entry("020"), _photo("020.jpg"))),
+        {"020": SUGGESTION},
+        existing={"020": row},
+        states=states,
+    )
+
+    updated = rescan.rows[0]
+    assert updated.latlon == "59.934280, 30.335099"
+    assert updated.map_link == "https://www.google.com/maps/@59.934280,30.335099,15z"
+    # The suggestion is untouched: a pasted link is a human act, not evidence.
+    assert updated.suggested_latlon == "55.700000, 37.600000"
+    assert rescan.map_links_applied == ["020"]
+
+
+def test_unparseable_map_link_leaves_latlon_alone() -> None:
+    outcome, states = _first_scan()
+    row = outcome.rows[0]
+    row.map_link = "https://www.google.com/maps/place/Валаам"
+
+    rescan, _ = build_rows(
+        _reconciliation((_entry("020"), _photo("020.jpg"))),
+        {"020": SUGGESTION},
+        existing={"020": row},
+        states=states,
+    )
+
+    updated = rescan.rows[0]
+    assert updated.latlon == "55.700000, 37.600000"
+    assert "could not be parsed" in updated.review_reason
+    assert rescan.map_links_unparsed == ["020"]
