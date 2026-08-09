@@ -1,11 +1,16 @@
 """Deciding whether a processed photo needs rebuilding.
 
 A build fingerprint answers one question: *would building this again produce
-the same file?* It therefore depends on exactly three things —
+the same file?* It therefore depends on exactly four things —
 
 * the source photo's content hash;
 * the final, human-owned metadata the build writes;
 * the build mapping version;
+* the compatibility-timestamp derivation policy version
+  (:data:`photoarchive.dates.DATE_COMPATIBILITY_POLICY_VERSION`) — changing
+  how a synthetic ``EXIF:DateTimeOriginal`` is derived from an approximate
+  archival date changes the file a build produces, even when the archival
+  date itself did not change;
 
 — and on nothing else. Timestamps, machine names and run ids are deliberately
 excluded: they change every run, and including them would make every photo look
@@ -22,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 
+from photoarchive.dates import DATE_COMPATIBILITY_POLICY_VERSION
 from photoarchive.portable.models import BUILD_VERSION
 from photoarchive.review.model import ReviewRow, split_list_field
 
@@ -71,6 +77,9 @@ def build_fingerprint(
         "source_hash": source_hash or "",
         "metadata": build_metadata(row),
         "build_version": build_version,
+        # A change to the compatibility-timestamp policy (photoarchive.dates)
+        # alone must force a rebuild, even though nothing else here changed.
+        "date_compatibility_policy_version": DATE_COMPATIBILITY_POLICY_VERSION,
     }
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"

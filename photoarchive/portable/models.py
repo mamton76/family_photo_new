@@ -43,6 +43,8 @@ STATE_DIRECTORY = "_archive_state"
 MANIFEST_FILENAME = "manifest.json"
 CATALOG_FILENAME = "catalog.json"
 SOURCES_DIRECTORY = "sources"
+#: Semantic baselines for the workbooks people edit.
+BASELINES_DIRECTORY = "artifact_baselines"
 
 
 class StateVersionError(RuntimeError):
@@ -81,6 +83,10 @@ class ArtifactSyncState:
     #: transfer happens, so three-way sync can never mistake "generated here"
     #: for "already synchronised with Drive".
     last_common_hash: str | None = None
+    #: Path, relative to the state directory, of the semantic baseline for this
+    #: artifact. The hash detects change; the baseline is what makes a
+    #: field-level merge possible.
+    semantic_baseline: str | None = None
     last_sync: OperationProvenance | None = None
 
     @property
@@ -94,6 +100,7 @@ class ArtifactSyncState:
             "local_content_hash": self.local_content_hash,
             "drive_file_id": self.drive_file_id,
             "last_common_hash": self.last_common_hash,
+            "semantic_baseline": self.semantic_baseline,
             "last_sync": self.last_sync.as_dict() if self.last_sync else None,
         }
 
@@ -104,6 +111,7 @@ class ArtifactSyncState:
             local_content_hash=data.get("local_content_hash"),
             drive_file_id=data.get("drive_file_id"),
             last_common_hash=data.get("last_common_hash"),
+            semantic_baseline=data.get("semantic_baseline"),
             last_sync=OperationProvenance.from_dict(data.get("last_sync")),
         )
 

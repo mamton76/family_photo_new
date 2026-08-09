@@ -23,7 +23,7 @@ keep consistent — inspection now happens once, across all three artefacts.
 
 ## Current stable checkpoint
 
-Verified against the repo, 2026-08-09. **307 tests passing.**
+Verified against the repo, 2026-08-10. **504 tests passing.**
 
 - [x] Public Yandex Disk scan, pagination, nested traversal, `--dry-run`
 - [x] DOCX grouping, section context, source notes, `DESCRIBED_ABSENT`
@@ -125,22 +125,65 @@ No workbooks in pure intermediate directories.
 - [x] Portable `_archive_state/` holding Drive ids, hashes, fingerprints, evidence
 - [x] `run` publishes a complete snapshot; `record_listing` tracks source items
 - [x] Three-way workbook sync rules, generation guard, `bootstrap` command
+- [x] Semantic three-way merge + Excel conflict workbook + `resolve-conflicts`
+- [x] Semantic normalization before conflict classification (People/Tags/Albums/
+      LatLon/Date/Place/Status/prose policy in `merge/semantic.py`)
+- [x] Explicit first-sync (no-baseline) decision table + first-sync merge
+      workbook UX (`FIRST_SYNC_CONFLICT`, `merge_first_sync`, no BASE offered)
 - [ ] Wire real Drive upload/download to the sync decisions (rules are done, transport is not)
+- [ ] Connect the merge path to real Drive transfers and advance baselines after them
 - [ ] Record Drive file ids into portable state during upload
-- [ ] Reserved `state.py` methods: `record_listing`, `record_description`,
-      `mark_built`, `mark_published`
+- [ ] Reserved `state.py` methods: `record_description`, `mark_built`,
+      `mark_published`
 - [ ] Handle renamed/moved source folders
 - [ ] Complete plain `scan` (no `--dry-run` / `--local-review`) as a real end-to-end command
 
 ## 9. Metadata `build`
 
+Date contract frozen (docs + pure helpers only — see
+`family-photo-archive-project.md`'s "Archival Dates and the Google Photos
+Compatibility Timestamp"); the ExifTool build pipeline itself is not
+implemented.
+
+- [x] Archival date vs. compatibility-timestamp split, precision model —
+      supported `DATETIME`/`DAY`/`MONTH`/`YEAR` (named explicitly, not by
+      enum order), unsupported `SEASON`/`UNKNOWN` — strict parser,
+      noon/day-15/July-1 policy, synthetic flag — `photoarchive/dates.py` +
+      `tests/test_dates.py`
+- [x] `DATE_COMPATIBILITY_POLICY_VERSION` folded into the build fingerprint
+- [x] Non-fatal `SEASON`/`UNKNOWN` contract documented + pure helpers
+      (`try_derive_compatibility_timestamp`, `authoritative_xmp_fields`): a
+      missing compatibility timestamp must not fail the whole photo build
 - [ ] Select only rows ready per workflow rules; work on copies only
 - [ ] ExifTool without re-encoding
-- [ ] Field mapping: EXIF `DateTimeOriginal`/`CreateDate`, GPS from final LatLon,
-      XMP/IPTC caption, keywords, People, Place, Description, Event, archive id
-- [ ] Date normalisation including partial dates; GPS validation
-- [ ] Preserve existing camera/scanner metadata unless deliberately replaced
-- [ ] Re-read built files to verify; deterministic rebuild; per-photo failure reporting
+- [ ] Write `EXIF:DateTimeOriginal` into the correct EXIF sub-IFD (not IFD0 —
+      a naive placement silently failed a real Google Photos test); when
+      precision is `SEASON`/`UNKNOWN`, leave it absent rather than inventing
+      one, and continue the build (see the non-fatal contract above)
+- [ ] `EXIF:DateTimeDigitized` only if the scan/digitisation date is actually
+      known, never copied from `DateTimeOriginal`
+- [ ] Write the required `XMP-archive:ArchiveDate`/`ArchiveDatePrecision`/
+      `CompatibilityDateSynthetic` properties (`authoritative_xmp_fields`),
+      for every precision including `SEASON`/`UNKNOWN`
+- [ ] Custom ExifTool tag config (`-config`/`.ExifTool_config`) declaring the
+      `archive` XMP namespace — required before ExifTool can write
+      `-XMP-archive:*` at all; does not exist yet
+- [ ] Decide whether to also write the optional, experimental
+      `XMP-photoshop:DateCreated` mirror (`experimental_standard_date_created`)
+      — **not required for correctness**; open question whether real tools
+      honour a truncated YEAR/MONTH value, to verify before relying on it
+- [ ] Field mapping: GPS from final LatLon, XMP/IPTC caption, keywords,
+      People, Place, Description, Event, archive id
+- [ ] GPS validation; no invented timezone
+- [ ] Preserve existing camera/scanner metadata; explicit precedence rule for
+      conflicting dates rather than silently overwriting
+- [ ] Re-read built files with ExifTool and validate — including the EXIF tag
+      *group*, not just the tag name, and that every `XMP-archive:*` property
+      (incl. `SEASON`/`UNKNOWN`, where `CompatibilityDateSynthetic` must be
+      genuinely absent) round-trips exactly; deterministic rebuild; per-photo
+      failure reporting
+- [ ] Real Google Photos ingestion test with production-writer files, all four
+      precisions, once build exists (Info-panel date + timeline placement)
 
 ## 10. Google Photos publishing
 

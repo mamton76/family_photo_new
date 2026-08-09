@@ -516,9 +516,162 @@ records the content hash both sides last agreed on:
 | same | changed | download |
 | **changed** | **changed** | **conflict — overwrite neither** |
 
-There is no automatic `.xlsx` merge: losing an afternoon of review typing is
-worse than asking which copy to keep. Generated artifacts use no such
-ceremony — they are regenerated and replaced.
+That file-level rule is the **safety gate**, not the answer. "Both changed"
+does not mean the whole workbook is an opaque conflict.
+
+### Semantic three-way merge
+
+These workbooks have a known schema, stable row identity and known human-owned
+fields, so `both changed` triggers a **field-level** merge:
+
+| local vs base | remote vs base | result |
+|---|---|---|
+| changed | unchanged | take local |
+| unchanged | changed | take remote |
+| changed | changed, same value | take that value |
+| changed | changed, differently | **true conflict** |
+
+Two people editing different columns of the same row merge automatically and
+nobody is asked. Only a genuine disagreement about one value reaches a person,
+and there nothing is guessed.
+
+Machine-owned columns — previews, `Source …`, every `Suggested …`, `Review
+Reason` — take no part: they are regenerated from source and dictionary state
+after the merge, so a difference in them means nothing.
+
+**Human-owned review fields:** Date, Place, LatLon, People, Tags, Event,
+Albums, Description, Status, Notes. `Status` is included because a reviewer
+marking a row APPROVED is a decision worth protecting; the scan re-applies its
+own lifecycle transitions afterwards.
+
+**Human-owned catalog fields:** canonical value, confirmed and candidate
+aliases, coordinates and candidate coordinates, map link, notes — keyed by
+stable entity id.
+
+### Semantic normalization
+
+"Changed" and "same value" above are judged by *meaning*, not raw text, so a
+merge never manufactures a conflict out of superficial formatting —
+`"Тоня, Мама"` and `"Мама; Тоня"` are the same two people. One module,
+`photoarchive.merge.semantic`, is the single place that decides what "the
+same" means per field, reusing the domain's existing parsers
+(`photoarchive.geo`, `split_list_field`) rather than a second copy of that
+logic. The three-way algorithm itself stays a plain `semantic_equal(a, b)`
+call; it never stores a normalised value.
+
+| field(s) | normalised as |
+|---|---|
+| People, Tags, Albums | split on `,`/`;`, case-folded, order-free set |
+| catalog confirmed/candidate aliases | split on `;`, order-free, case kept (matches the catalog importer) |
+| LatLon | canonical `lat, lon` text when parseable; unparsable text falls back to whitespace-only |
+| Date | whitespace only — `"1979"` and `"1979-05"` stay different on purpose, since collapsing them would fabricate a precision nobody stated |
+| Place | whitespace only — dictionary aliases never decide two spellings mean the same place; that ownership stays with `Suggested Place` |
+| Description, Notes | line-ending and outer-blank trivia only; prose is never reordered or reflowed |
+| Status | exact value, once blank is normalised |
+
+Normalisation exists only to answer "equal?". The **raw value** a person
+typed is what is always carried forward — into the merged record, into the
+conflict workbook's Base/This computer/Google Drive columns, into its
+comment. Nothing normalised is ever displayed or written out.
+
+### The semantic baseline
+
+A hash detects change but cannot merge, so portable state also keeps the last
+**agreed content** of each synced workbook in
+`_archive_state/artifact_baselines/`: stable identity plus human-owned fields,
+as compact JSON. No previews, no machine columns, no archived `.xlsx`.
+
+A baseline is written only after a real transfer or an applied merge. Writing
+one after a purely local generation would claim an agreement that never
+happened.
+
+### Resolving a conflict in Excel
+
+When conflicts remain, **neither copy is touched**. A merge workbook is
+generated in `_conflicts/<run-id>/`, clearly apart from the canonical files:
+
+* **Info** — artifact, run, machine, commit, and the base/local/remote hashes,
+  so an old merge workbook still explains itself months later;
+* **Merge** — the reconstructed content with automatic merges already applied;
+  only genuinely conflicting *cells* are shaded, each carrying a note with the
+  base, local and Drive values. Shading one cell rather than the row keeps the
+  eye on the actual decision;
+* **Conflicts** — one row per conflicting field with a validated
+  `Resolution Choice` dropdown: `LOCAL`, `DRIVE`, `BASE`, `CUSTOM`.
+
+Opening or saving the workbook resolves nothing. Every conflict needs an
+explicit choice — including "keep what I already had".
+
+```bash
+python app.py resolve-conflicts <path-to-merge.xlsx>
+python app.py resolve-conflicts <path> --check
+```
+
+Applying re-checks the remote **before** writing anything. If Drive moved while
+somebody was deciding, the run stops with `REMOTE CHANGED SINCE CONFLICT WAS
+CREATED` and recomputes rather than overwriting newer work. Only after the
+transfer succeeds do `last_common_hash`, the semantic baseline and `last_sync`
+advance. The resolved workbook is renamed, not deleted — the reasoning is worth
+keeping.
+
+### First sync: no common baseline
+
+`ArtifactSyncState.semantic_baseline == None` means exactly one thing: no
+proven common ancestor. That is handled as four explicit cases — none of them
+may guess an ancestor that never existed, and none may pick a side by
+timestamp, machine or filename:
+
+| situation | action | after a real transfer/adoption succeeds |
+|---|---|---|
+| local exists, remote absent | `ADOPT_LOCAL` — initial upload is safe | Drive file id, `last_common_hash`, semantic baseline and `last_sync` are recorded |
+| local absent, remote exists | `ADOPT_REMOTE` — initial download is safe | local becomes the remote's content; baseline = remote's semantic model |
+| both exist, semantically equal | `ADOPT_BASELINE` — no transfer needed | the agreed content becomes the first baseline; no human involved |
+| both exist, genuinely differ | `FIRST_SYNC_CONFLICT` | nothing until a first-sync merge workbook is resolved |
+
+"Semantically equal" is checked with the same comparator as an ordinary merge,
+so two `.xlsx` files with different ZIP bytes but identical editable content
+(`semantic_baselines_equal`) still adopt cleanly instead of becoming a
+conflict. Without semantic content to compare, differing hashes are
+conservatively treated as genuinely different — never guessed into agreement.
+
+A first-sync merge reuses the ordinary field-level algorithm
+(`merge_first_sync`) against an empty `base`: every record present on exactly
+one side is a safe addition, and a record on both sides is compared field by
+field exactly as above. The only conflict that can occur is the same stable id
+present on both sides with differing content, reported as `ConflictKind.
+FIRST_SYNC` rather than the ordinary `ADDED_BOTH`.
+
+The resulting workbook reuses the same writer and formatting as an ordinary
+conflict workbook, with three differences:
+
+* the Info sheet leads with **"FIRST SYNC — NO COMMON BASELINE"** instead of
+  the usual banner, and the base/last-sync rows read "no common baseline"
+  rather than showing a hash that was never agreed on;
+* the Base column and each conflict's comment show "— no common baseline —"
+  instead of a base value, so it reads as *nothing to compare against* rather
+  than a genuinely blank one;
+* the `Resolution Choice` dropdown offers only `LOCAL`, `DRIVE` and `CUSTOM` —
+  `BASE` is not in the list, and is rejected as unresolved even if typed in by
+  hand, since there is no base value to apply.
+
+No `last_common_hash`, semantic baseline or `last_sync` is written by deciding
+or merging alone — only `record_sync`, after a real transfer or adoption
+actually succeeds, ever advances them.
+
+### Structural edits
+
+Source scanning owns which review rows exist, so a row missing from somebody's
+copy is **not** permission to delete an archive item; the row is kept. This
+holds during a first sync too: a row absent from exactly one side is an
+addition on the other, never a deletion, because first sync has no base from
+which "deleted" could even be judged. In the catalog, deletion is a supported
+edit: it is honoured when the other side left the entity alone, and raised as
+a conflict when the other side changed it. Independent additions merge when
+their stable ids do not collide; the same id created differently on both sides
+is a conflict.
+
+Generated artifacts use none of this ceremony — they are regenerated and
+replaced.
 
 ### Build fingerprints
 
@@ -572,15 +725,29 @@ Rules:
 
 ## Metadata Output
 
-A future build step will create processed copies and write metadata through **ExifTool**.
+**Not implemented yet.** `photoarchive/metadata/exiftool.py` is a skeleton —
+every method raises `NotImplementedError`. What follows is the frozen
+*contract* the eventual build step must implement against; it is not a
+description of working code. The pure, tested parts of the date half of that
+contract already exist in `photoarchive/dates.py` (see below) — everything
+else (ExifTool invocation, GPS/IPTC/XMP writing beyond the date fields,
+re-read verification) is still to be built.
 
-Source photos are never modified.
+A future build step will create processed copies and write metadata through
+**ExifTool** (or another standards-correct writer — never hand-rolled EXIF
+placement). Source photos are never modified; only a processed copy in the
+local cache is written to.
 
 Target metadata includes:
 
 ### EXIF
 
-- capture date/time;
+- `EXIF:DateTimeOriginal` — the capture-date compatibility timestamp, always
+  addressed through its EXIF group (see "Archival date vs compatibility
+  timestamp" below — writing it to the wrong TIFF IFD is why a naive first
+  attempt failed a real Google Photos test);
+- `EXIF:DateTimeDigitized` — only when the actual scan/digitisation date is
+  known; otherwise left unset (never copied from `DateTimeOriginal`);
 - GPS coordinates.
 
 ### IPTC/XMP
@@ -590,24 +757,211 @@ Target metadata includes:
 - people;
 - controlled tags;
 - event;
-- date precision;
+- the archival date and its precision, in a small custom XMP namespace (see
+  below) — not just "date precision" as a bare fact, but the actual value and
+  a flag saying whether the EXIF timestamp was invented;
 - internal archive ID.
 
-## Approximate Dates
+### Re-read verification
 
-Historic photos may have incomplete dates.
+The build is not complete after writing. For every built file: write, then
+re-read with ExifTool, then validate — at minimum `EXIF:DateTimeOriginal`
+**and its tag group** (a tag found by name alone, in the wrong IFD, is not a
+pass — that is exactly the bug the manual Google Photos test caught), the XMP
+archival date, its precision property, and the synthetic flag.
 
-Keep precision separately:
+## Archival Dates and the Google Photos Compatibility Timestamp
+
+Two different things, never conflated:
+
+**Archival date** — the truth as actually known from the family archive: a
+value plus its precision. `1979` never becomes `1979-01-01`; an unknown month,
+day or time is never invented. This is what `review.xlsx`'s final `Date`
+column already holds, as partial-ISO text (`1979`, `1979-05`, `1979-05-17`),
+now extended to also accept a known time (`1979-05-17 14:30`,
+`1979-05-17 14:30:45`).
+
+**Compatibility timestamp** — a full timestamp derived *only* for a consumer
+that requires one (Google Photos' `EXIF:DateTimeOriginal` above all). A
+display aid, never a claim about what is actually known, and it never
+overwrites or replaces the archival date.
+
+Implemented, pure and tested in `photoarchive/dates.py`
+(`tests/test_dates.py`): `ArchiveDate.parse`/`.text()`,
+`DatePrecision` (`DATETIME`, `DAY`, `MONTH`, `SEASON`, `YEAR`, `UNKNOWN`),
+`CompatibilityTimestamp`, and `derive_compatibility_timestamp`.
+
+**Supported precisions — named explicitly, never by enum declaration
+order:** `DATETIME`, `DAY`, `MONTH`, `YEAR` have a defined
+compatibility-timestamp policy. **Unsupported:** `SEASON` and `UNKNOWN` — see
+"Unsupported precision at build time" below for what that means in practice
+(not a fatal build error).
+
+### Precision and parsing
 
 ```text
-exact
-month
-season
-year
-unknown
+YEAR      1979
+MONTH     1979-05
+DAY       1979-05-17
+DATETIME  1979-05-17 14:30        (seconds optional; canonicalised to :00)
+DATETIME  1979-05-17 14:30:45
 ```
 
-A future build step may use configurable fallback dates for EXIF, but the original precision must always remain stored.
+Each accepted shape maps to exactly one precision. Malformed or
+locale-ambiguous input (`05/06/79`, `1979/05/17`, an unpadded month, an
+invalid calendar date) is rejected with `InvalidArchiveDate`, never guessed
+at. `SEASON` (e.g. "лето 1980") remains a recognised precision but has no
+parser or compatibility-timestamp policy defined in this pass — an open
+question, not something to silently handle.
+
+### Compatibility-timestamp policy
+
+| precision | `EXIF:DateTimeOriginal` | synthetic |
+|---|---|---|
+| DATETIME | the known time, verbatim | `False` |
+| DAY | known date, **noon** (`12:00:00`) | `True` |
+| MONTH | known year/month, **day 15**, noon | `True` |
+| YEAR | known year, **July 1**, noon | `True` |
+
+Noon rather than midnight for DAY: a classic EXIF `DateTimeOriginal` string
+carries no timezone, so noon keeps the instant far from either local
+midnight — the case most likely to round the photo onto the wrong calendar
+day. Day 15 and July 1 are **fixed conventions**, not computed
+month-length-aware midpoints — deliberately, so the mapping never changes
+shape by month or leap year. July 1 rather than January 1 specifically avoids
+systematically pushing every year-only photo to the start of the year.
+
+`SEASON`/`UNKNOWN` have no policy; `derive_compatibility_timestamp` raises
+rather than inventing one.
+
+### Unsupported precision at build time is not fatal
+
+`derive_compatibility_timestamp` raising for `SEASON`/`UNKNOWN` is a
+statement about that one pure function, not about whether a photo build may
+succeed. The future build orchestrator must use
+`try_derive_compatibility_timestamp` (returns `None` instead of raising) and
+treat a `None` result as **non-fatal**:
+
+- archival metadata (`authoritative_xmp_fields` — the archival date text and
+  its precision) is still written, for every precision, `SEASON`/`UNKNOWN`
+  included;
+- `EXIF:DateTimeOriginal` is simply left absent — never invented from a
+  season or an unknown date;
+- the photo build may still succeed;
+- a warning/diagnostic is recorded — always for `SEASON` (a real season was
+  stated; only the timestamp policy is missing), only when useful for
+  `UNKNOWN` (there may be nothing more to say).
+
+### Synthetic provenance (XMP)
+
+A synthetic EXIF timestamp is indistinguishable from a real one to a naive
+reader, so the archival value and precision are also written to XMP, in a
+small custom namespace kept apart from any standard field whose semantics
+might differ. These are **authoritative and required**, for every precision
+including `SEASON`/`UNKNOWN` (`authoritative_xmp_fields`):
+
+- `XMP-archive:ArchiveDate` — the canonical archival text;
+- `XMP-archive:ArchiveDatePrecision` — the precision, as its lower-case text;
+- `XMP-archive:CompatibilityDateSynthetic` — `"True"`/`"False"`, present only
+  when a compatibility timestamp was actually derived (omitted, not written
+  as a placeholder, for `SEASON`/`UNKNOWN`).
+
+**Standard-field mirror — optional, experimental, not a production
+requirement.** As a best-effort convenience for generic XMP-aware tools that
+do not know this custom namespace, `experimental_standard_date_created`
+proposes the same value for the standard `XMP-photoshop:DateCreated` (the XMP
+`Date` type explicitly permits year/year-month/year-month-day truncation,
+unlike EXIF's fixed string). This mirror is **not authoritative** and **must
+not be treated as required for correctness**: a consumer that pads or
+reinterprets a truncated value must not be trusted over the `XMP-archive:*`
+properties. Whether real tools actually honour a truncated
+`photoshop:DateCreated` — for the `YEAR`/`MONTH` truncated forms especially —
+rather than silently discarding or padding it, has not been verified against
+a real file, an eventual real ExifTool round trip, or Google Photos
+ingestion — **open question for the eventual acceptance test, not resolved by
+this pass**. A full-precision `DAY`/`DATETIME` value is an ordinary
+unambiguous ISO date that may prove safe to mirror once that verification
+happens, but the authoritative `XMP-archive:*` properties are written
+regardless of what is decided about this mirror.
+
+### Custom XMP namespace: future ExifTool round-trip contract
+
+Not implemented yet — no ExifTool config exists, and none is written by this
+pass — but the acceptance contract is explicit so `XMP-archive:*` never stays
+merely a conceptual label:
+
+- **namespace** — a stable, versioned URI (`XMP_ARCHIVE_NAMESPACE_URI`) and
+  prefix (`XMP_ARCHIVE_NAMESPACE_PREFIX`); the URI does not need to resolve to
+  anything, only to uniquely and stably identify the schema;
+- **property names** — exactly `ArchiveDate`, `ArchiveDatePrecision`,
+  `CompatibilityDateSynthetic`, fixed strings;
+- **types/serialization** — all three are XMP simple (string) properties;
+  `CompatibilityDateSynthetic` is exactly the literal `"True"`/`"False"`, and
+  is *absent*, not a placeholder, when there is no compatibility timestamp;
+- **deterministic writing** — derived solely from the `ArchiveDate`/
+  `CompatibilityTimestamp` being built; no runtime timestamp, machine id or
+  run id;
+- **re-read validation (acceptance test)** — once ExifTool integration
+  exists: write with ExifTool, re-read with ExifTool, every property
+  reproduces exactly, for `YEAR`, `MONTH`, `DAY`, `DATETIME`, `SEASON` and
+  `UNKNOWN` (where applicable to each);
+- **ExifTool config dependency** — ExifTool cannot write an arbitrary
+  `-XMP-archive:ArchiveDate=...` tag without a user-defined tag config
+  (`-config` / `.ExifTool_config`) declaring this namespace first. That
+  config does not exist yet; writing it is future build-implementation work
+  (tracked in `todo.md`), not something this pass creates.
+
+### `DateTimeDigitized` vs `DateTimeOriginal`
+
+For old scanned photographs, "when the photograph was taken" and "when the
+digital file was created" are different facts. `DateTimeOriginal` carries the
+historical-capture compatibility timestamp; `DateTimeDigitized` is written
+only when the actual scan/digitisation date is genuinely known, and is never
+auto-populated from `DateTimeOriginal` merely to satisfy a consumer. The
+manual Google Photos test that populated both fields was a compatibility
+experiment, not production policy — if later real-world testing shows Google
+Photos needs a second populated field to ingest reliably, that must be
+documented as an explicit, named compatibility exception, not silently folded
+into the default policy.
+
+### Timezone
+
+Never invented. A classic EXIF `DateTimeOriginal` string carries no
+timezone; if an offset field is written later, it must hold a genuinely known
+offset. The noon convention exists specifically to blunt timezone-boundary
+surprises without pretending to know a timezone.
+
+### Existing metadata precedence
+
+Build operates on managed copies only; Yandex originals are never modified.
+Precedence for dates, to be enforced once the build step is implemented:
+
+- do not overwrite a known original camera `DateTimeOriginal` with a weaker
+  inferred archive date without an explicit precedence rule;
+- for digitised historical scans where the archive's own metadata is
+  authoritative, write per the policy above;
+- if a source file already carries conflicting date metadata, surface/report
+  it rather than silently discarding evidence.
+
+### Build fingerprint
+
+`photoarchive.dates.DATE_COMPATIBILITY_POLICY_VERSION` (currently `1`) is
+folded into `build_fingerprint` (`photoarchive/portable/fingerprint.py`)
+alongside the archival date value, precision and `BUILD_VERSION`. Changing
+the policy — e.g. moving the YEAR midpoint off July 1 — must therefore force
+a rebuild of every affected file on its own, without a source or metadata
+change. No runtime timestamp, machine id or run id is ever part of it.
+
+### Google Photos is a consumer, not the source of truth
+
+Even if Google Photos later lets someone edit a displayed date, that UI edit
+is not authoritative. The authoritative source stays `review.xlsx`'s final
+`Date` + its precision + portable state/build metadata. Do not design the
+archive around irreversible Google Photos UI behaviour. A real Google Photos
+ingestion test — using files from the actual production ExifTool writer, not
+an ad-hoc script — remains an acceptance test once the build step exists, for
+all four precisions, checking both the Info-panel date and timeline
+placement.
 
 ## Local Cache
 

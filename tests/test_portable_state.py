@@ -317,9 +317,13 @@ def test_first_sync_adopts_whichever_side_exists() -> None:
 
 
 def test_two_independent_copies_without_a_baseline_conflict() -> None:
+    # No baseline and no semantic content to compare: conservatively a
+    # first-sync conflict, not an ordinary one — there is no BASE.
     decision = decide("c.xlsx", "sha256:l", "sha256:r", _baseline(None))
 
-    assert decision.action is SyncAction.CONFLICT
+    assert decision.action is SyncAction.FIRST_SYNC_CONFLICT
+    assert decision.is_conflict
+    assert decision.is_first_sync
 
 
 def test_conflict_report_names_the_last_common_sync() -> None:

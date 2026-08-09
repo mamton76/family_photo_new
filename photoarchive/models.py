@@ -31,13 +31,23 @@ class WorkflowStatus(str, Enum):
 
 
 class DatePrecision(str, Enum):
-    """How precisely the capture date of a photo is known.
+    """How precisely an archival date is known.
 
     Precision is stored separately from the date itself, so that an
-    approximate date is never mistaken for an exact one.
+    approximate date is never mistaken for an exact one, and so a compatibility
+    consumer that needs a full timestamp (see :mod:`photoarchive.dates`) can be
+    told plainly which components of it were invented.
+
+    Supported by :mod:`photoarchive.dates`'s compatibility-timestamp policy —
+    named explicitly, never by enum declaration order: ``DATETIME``, ``DAY``,
+    ``MONTH``, ``YEAR``. Not supported: ``SEASON`` (e.g. "лето 1980") and
+    ``UNKNOWN``. Deriving a policy for those is an open question, not
+    something to guess at — see :mod:`photoarchive.dates` for the future,
+    non-fatal build behaviour this implies.
     """
 
-    EXACT = "exact"
+    DATETIME = "datetime"
+    DAY = "day"
     MONTH = "month"
     SEASON = "season"
     YEAR = "year"
