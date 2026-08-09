@@ -32,6 +32,9 @@ from photoarchive.catalog.importer import import_catalog
 from photoarchive.catalog.learning import LearningContext, learn_from_rows
 from photoarchive.catalog.service import CATALOG_FILENAME, CatalogService
 from photoarchive.catalog.store import DictionaryStore
+from photoarchive.dashboard.aggregate import collect as collect_review_rows
+from photoarchive.dashboard.html import DASHBOARD_FILENAME, write_dashboard
+from photoarchive.dashboard.preview import PreviewProvider
 from photoarchive.scanning.local_review import generate_folder_review
 from photoarchive.scanning.report import (
     build_dry_run_report,
@@ -137,6 +140,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show what would be learned without changing SQLite or catalog.xlsx.",
     )
     learn.set_defaults(handler=command_learn)
+
+    dashboard = subparsers.add_parser(
+        "dashboard",
+        parents=[common],
+        help="Generate the read-only review-all.html archive dashboard.",
+    )
+    dashboard.add_argument(
+        "--source",
+        type=Path,
+        default=DEFAULT_REVIEW_DIR,
+        help="Directory searched recursively for review.xlsx (default: ./review-output).",
+    )
+    dashboard.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Output path (default: <source>/review-all.html).",
+    )
+    dashboard.set_defaults(handler=command_dashboard)
 
     build = subparsers.add_parser(
         "build",
@@ -261,6 +283,9 @@ def _run_local_review(
 
     state = StateRepository()
     state.initialize()
+    # Remember which Yandex share produced this output folder, so the dashboard
+    # can link back to it and previews can be found by root identity.
+    state.register_source_root(source_root)
     dictionary_store = DictionaryStore()
     dictionary_store.initialize()
     dictionary = dictionary_store.load()
@@ -331,6 +356,47 @@ def _run_local_review(
         f"candidate aliases {catalog_counts.candidate_aliases}, "
         f"candidate coordinates {catalog_counts.candidate_coordinates}"
     )
+    return 0
+
+
+def command_dashboard(args: argparse.Namespace, config: AppConfig) -> int:
+    """Generate the archive-wide dashboard. Reads only; writes one HTML file."""
+    output = args.output or (args.source / DASHBOARD_FILENAME)
+
+    state = StateRepository()
+    state.initialize()
+    source_roots = state.list_source_roots()
+
+    aggregate = collect_review_rows(args.source, source_roots)
+    previews = PreviewProvider(config.cache.directory)
+    path = write_dashboard(aggregate, output, previews)
+
+    size_mb = path.stat().st_size / (1024 * 1024)
+    log_summary(
+        f"Dashboard {path}",
+        {
+            "folders": len(aggregate.groups),
+            "rows": aggregate.rows,
+            "present_photos": aggregate.present_photos,
+            "described_absent": aggregate.absent_photos,
+            "needs_review": aggregate.needs_review,
+            "size_mb": f"{size_mb:.1f}",
+        },
+    )
+
+    print(f"dashboard: {path}")
+    print(f"size: {size_mb:.1f} MB")
+    print(
+        f"folders: {len(aggregate.groups)}  rows: {aggregate.rows}  "
+        f"photos: {aggregate.present_photos}  "
+        f"described-absent: {aggregate.absent_photos}  "
+        f"needs review: {aggregate.needs_review}"
+    )
+    for group in aggregate.groups:
+        print(
+            f"  [{group.label}] rows {len(group.rows)}  photos {group.present_photos}  "
+            f"absent {group.absent_photos}  needs review {group.needs_review}"
+        )
     return 0
 
 

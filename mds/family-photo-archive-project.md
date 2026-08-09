@@ -385,6 +385,49 @@ block creation. Moving an alias from
 `latlon` confirms them. Invalid edits are reported and skipped, and never
 destroy the last known-good confirmed value.
 
+## `review-all.html` — the archive dashboard
+
+A generated, **read-only** page covering the whole archive:
+`review-output/review-all.html`. It is deliberately not a workbook — an
+aggregate `.xlsx` would look exactly like the file people *do* edit and would
+eventually be edited by mistake. HTML makes the ownership rule structural.
+
+```text
+review.xlsx      editable photo review metadata
+catalog.xlsx     editable dictionaries
+review-all.html  generated read-only dashboard
+```
+
+It writes nothing to SQLite, the workbooks or the catalog, and contains no
+controls implying anything can be saved.
+
+Contents: a `Summary` table (per folder — rows, photos, described-absent,
+status counts, filled Date/People/Place/LatLon/Tags, needs-review, totals) and a
+`Review` section grouping every row by source root → folder → reference, with
+collapsible groups, search, status/folder filters and quick filters for missing
+fields. Coordinates link to Google Maps; suggestions render secondary to final
+values.
+
+### Preview assets vs destination links
+
+Two separate concepts, and the separation matters:
+
+* **Preview** — an image this pipeline generated from a locally cached photo,
+  embedded in the page. A static page must never use a provider thumbnail URL
+  as `<img src>`: those expire and need live authorization, so the dashboard
+  would rot into broken images.
+* **Destinations** — where a reader can go: Yandex source, Google Drive
+  archive copy, Google Photos published item. These are navigation links.
+
+Destinations accumulate rather than replace each other. Once published, Google
+Photos becomes the *primary* button because that is where browsing, albums and
+search live, but the Drive and Yandex links remain visible as archive and
+provenance. Links a photo does not have simply are not rendered — no dead
+buttons.
+
+Drive and Photos fields are modelled now and populate themselves when those
+phases exist, without touching the review workbooks.
+
 ## The Iterative Loop
 
 ```text

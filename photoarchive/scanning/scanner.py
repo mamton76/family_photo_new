@@ -31,17 +31,13 @@ from dataclasses import dataclass, field
 
 from photoarchive.config import AppConfig
 from photoarchive.models import RemoteSourceItem, SourceRoot
+from photoarchive.naming import FALLBACK_ROOT_NAME, sanitize_folder_name
 from photoarchive.state import StateRepository
 from photoarchive.storage.base import ReadableStorage, WritableStorage
 
 PHOTO_EXTENSIONS: frozenset[str] = frozenset(
     {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".heic", ".heif", ".webp", ".bmp", ".gif"}
 )
-
-#: Characters Google Drive folder names must not contain, plus control chars.
-_UNSAFE_NAME_CHARACTERS = str.maketrans({"/": "-", "\\": "-", "\n": " ", "\r": " ", "\t": " "})
-
-FALLBACK_ROOT_NAME = "source"
 
 #: The only description format parsed in this phase.
 DESCRIPTION_DOCUMENT_EXTENSION = ".docx"
@@ -72,19 +68,6 @@ def join_relative_path(parent: str, name: str) -> str:
     if not name:
         return parent
     return f"{parent}/{name}"
-
-
-def sanitize_folder_name(name: str) -> str:
-    """Make a source folder name safe to use as a single destination folder.
-
-    Path separators would otherwise split one source root across several
-    destination folders, so they are replaced rather than removed. An empty or
-    whitespace-only name falls back to :data:`FALLBACK_ROOT_NAME`, since a
-    source root must always land in a folder of its own.
-    """
-    cleaned = name.translate(_UNSAFE_NAME_CHARACTERS).strip().strip(".")
-    cleaned = " ".join(cleaned.split())
-    return cleaned or FALLBACK_ROOT_NAME
 
 
 def destination_path(source_root: SourceRoot, relative_path: str = "") -> str:

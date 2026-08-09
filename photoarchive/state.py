@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from photoarchive.models import SourceRoot
+from photoarchive.naming import sanitize_folder_name as sanitize_destination_name
 
 DEFAULT_STATE_PATH = Path("archive.sqlite")
 
@@ -175,10 +176,47 @@ class StateRepository:
         Looked up by :attr:`SourceRoot.identity`, so a renamed source folder
         updates the existing row instead of creating a second archive.
 
-        TODO: implement the upsert and report renames to the caller, since a
-        rename means the dedicated destination folder needs renaming too.
+        Recording the URL is what later lets the dashboard link a generated
+        folder back to the Yandex share it came from, and lets local caches be
+        found by identity rather than by guessing from filenames.
         """
-        raise NotImplementedError("register_source_root is not implemented yet")
+        timestamp = utc_now().isoformat()
+        destination = sanitize_destination_name(source_root.name)
+
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO source_roots (identity, source_url, name,"
+                " destination_name, first_seen, last_scan)"
+                " VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT (identity) DO UPDATE SET"
+                " source_url = excluded.source_url,"
+                " name = excluded.name,"
+                " destination_name = excluded.destination_name,"
+                " last_scan = excluded.last_scan",
+                (
+                    source_root.identity,
+                    source_root.url,
+                    source_root.name,
+                    destination,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            row = connection.execute(
+                "SELECT id FROM source_roots WHERE identity = ?",
+                (source_root.identity,),
+            ).fetchone()
+        return int(row["id"])
+
+    def list_source_roots(self) -> list[SourceRoot]:
+        """Every source root the pipeline has scanned."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT identity, source_url, name FROM source_roots ORDER BY name"
+            ).fetchall()
+        return [
+            SourceRoot(url=row["source_url"], name=row["name"]) for row in rows
+        ]
 
     def record_listing(self, root_id: int, items: object) -> ChangeSet:
         """Persist a fresh listing and report new/changed/missing items."""

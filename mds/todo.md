@@ -6,11 +6,10 @@ don't restate it here.
 
 ## NEXT
 
-- [ ] Commit the current stable milestone
-- [ ] Manually inspect current `review.xlsx` and `catalog.xlsx` UX
-- [ ] Fix shared Excel layout/UX issues found
-- [ ] Build generated `review-all.xlsx` (`Summary` + `Review`)
-- [ ] Manually inspect all three workbook types
+- [x] Commit the previous stable milestone
+- [x] Build generated `review-all.html` (`Summary` + `Review`)
+- [ ] Manually inspect `review.xlsx` + `catalog.xlsx` + `review-all.html` together
+- [ ] Fix UX issues found
 - [ ] Validate People / Tags iterative propagation and catalog curation
 - [ ] Improve candidate / evidence / rejection UX
 - [ ] Harden source-change lifecycle
@@ -18,8 +17,8 @@ don't restate it here.
 - [ ] Implement metadata `build`
 - [ ] Implement Google Photos publishing
 
-Excel inspection comes **before** `review-all.xlsx` so layout mistakes aren't
-copied into a third workbook and then fixed twice.
+The aggregate is HTML, not a workbook, so there is no third Excel layout to
+keep consistent — inspection now happens once, across all three artefacts.
 
 ## Current stable checkpoint
 
@@ -56,21 +55,20 @@ Enough Excel behaviour exists that human judgement is required, not just tests.
       curation is discoverable
 - [ ] Record layout fixes to apply before a third workbook exists
 
-## 3. `review-all.xlsx` (generated aggregate)
+## 3. `review-all.html` (generated dashboard) — done, refinements open
 
-**v1 ownership:** per-folder `review.xlsx` is the editable source of truth;
-`review-all.xlsx` is generated only. No imports from it.
+`review-output/review-all.html` is generated and read-only; per-folder
+`review.xlsx` and `catalog.xlsx` remain the editable surfaces.
 
-- [ ] `Summary` sheet — one row per folder: rows/photos, status counts,
-      Date/People/Place/LatLon/Tags filled, Needs Review, plus totals
-- [ ] `Review` sheet — all rows, with Source Root + Folder before the normal columns
-- [ ] Sort by Source Root → Folder → Filename / Reference
-- [ ] Freeze panes, filters, outline grouping; previews via the existing builder
-- [ ] CLI command to generate it
-- [ ] Tests: deterministic aggregation, totals match detail rows, `DESCRIBED_ABSENT`
-      included, previews, stable ordering, **never mutates folder workbooks**
-- [ ] After real use, decide whether it should become the primary editable review UI
-      (if so: exactly one authoritative edit source, deliberately designed)
+- [x] `Summary` + grouped `Review`, collapsible, search and filters
+- [x] Self-contained: inline CSS/JS, embedded thumbnails and medium previews
+- [x] Previews generated locally — never a provider URL as `<img src>`
+- [x] Destination links accumulate; Photos > Drive > Yandex priority modelled
+- [x] Coordinates link to Google Maps; suggestions secondary to finals
+- [ ] Switch preview storage to `review-all_files/` when the archive outgrows one
+      file (currently 18.7 MB for 61 photos; the renderer is already decoupled)
+- [ ] Per-photo Yandex links instead of folder-level, if the API exposes them
+- [ ] Populate Drive / Photos links once those phases exist
 
 ## 4. People / Tags iterative propagation
 
@@ -122,7 +120,7 @@ No workbooks in pure intermediate directories.
 - [ ] Idempotent re-sync of an existing subtree
 - [ ] Upload photo copies; never touch originals
 - [ ] Sync `review.xlsx` without clobbering reviewer edits
-- [ ] `catalog.xlsx` at the root; decide placement for `review-all.xlsx`
+- [ ] `catalog.xlsx` at the root; decide placement for `review-all.html`
 - [ ] Stable source ↔ Drive-id mapping (implement the reserved `state.py` methods:
       `register_source_root`, `record_listing`, `record_description`,
       `mark_built`, `mark_published`)
@@ -158,7 +156,7 @@ metadata does not train Google's face identities.
 
 ## 12. CLI, diagnostics, docs
 
-- [ ] Command to generate `review-all.xlsx`
+- [x] `dashboard` command generates `review-all.html`
 - [ ] Decide whether `--local-review` becomes the default for `scan`
 - [ ] Backup before workbook rewrite/import (currently manual)
 - [ ] Retention/cleanup for `logs/` and `review-output-backup-*/` (3 already accumulated)
@@ -169,7 +167,7 @@ metadata does not train Google's face identities.
 
 - [x] Unit, mocked-HTTP, round-trip and idempotency suites
 - [ ] Source-change integration tests against the real folders
-- [ ] Aggregate workbook tests
+- [x] Dashboard aggregation, preview and link tests
 - [ ] Later: Drive integration, metadata re-read, Photos mocks
 
 Real-source regression baseline:
