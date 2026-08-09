@@ -73,13 +73,25 @@ class ArtifactSyncState:
     """
 
     path: str
+    #: What this file contains locally right now. Recording it is *not* a claim
+    #: that anyone has seen it remotely.
+    local_content_hash: str | None = None
     drive_file_id: str | None = None
+    #: The content both sides last agreed on. Stays ``None`` until a real
+    #: transfer happens, so three-way sync can never mistake "generated here"
+    #: for "already synchronised with Drive".
     last_common_hash: str | None = None
     last_sync: OperationProvenance | None = None
+
+    @property
+    def is_synced(self) -> bool:
+        """True only once this artifact has actually been transferred."""
+        return self.last_common_hash is not None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "path": self.path,
+            "local_content_hash": self.local_content_hash,
             "drive_file_id": self.drive_file_id,
             "last_common_hash": self.last_common_hash,
             "last_sync": self.last_sync.as_dict() if self.last_sync else None,
@@ -89,6 +101,7 @@ class ArtifactSyncState:
     def from_dict(cls, data: dict[str, Any]) -> ArtifactSyncState:
         return cls(
             path=str(data.get("path", "")),
+            local_content_hash=data.get("local_content_hash"),
             drive_file_id=data.get("drive_file_id"),
             last_common_hash=data.get("last_common_hash"),
             last_sync=OperationProvenance.from_dict(data.get("last_sync")),
@@ -109,6 +122,13 @@ class ItemState:
     source_hash: str | None = None
     size: int | None = None
     modified_at: str | None = None
+
+    #: The rest of the per-row bookkeeping a rescan compares against. Restoring
+    #: only the photo hash would make a bootstrapped machine report every
+    #: description and suggestion as changed.
+    description_hash: str | None = None
+    suggestion_hash: str | None = None
+    was_absent: bool = False
 
     drive_file_id: str | None = None
     drive_path: str | None = None
@@ -134,6 +154,9 @@ class ItemState:
             "drive_file_id": self.drive_file_id,
             "drive_path": self.drive_path,
             "status": self.status,
+            "description_hash": self.description_hash,
+            "suggestion_hash": self.suggestion_hash,
+            "was_absent": self.was_absent,
         }
         if self.build_fingerprint or self.last_build:
             payload["last_build"] = {
@@ -170,6 +193,48 @@ class ItemState:
             google_photos_product_url=photos.get("product_url"),
             published_at=photos.get("published_at"),
             status=data.get("status"),
+            description_hash=data.get("description_hash"),
+            suggestion_hash=data.get("suggestion_hash"),
+            was_absent=bool(data.get("was_absent", False)),
+        )
+
+
+@dataclass(slots=True)
+class SourceItemObservation:
+    """One file as the source provider last reported it.
+
+    Distinct from :class:`ItemState`: a folder of 12 photos described by a DOCX
+    listing 24 references produces 12 observations and 24 logical rows. Both
+    must survive, or recovery loses either the change detection or half the
+    review.
+    """
+
+    relative_path: str
+    remote_id: str | None = None
+    is_directory: bool = False
+    size: int | None = None
+    modified_at: str | None = None
+    content_hash: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "relative_path": self.relative_path,
+            "remote_id": self.remote_id,
+            "is_directory": self.is_directory,
+            "size": self.size,
+            "modified_at": self.modified_at,
+            "content_hash": self.content_hash,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SourceItemObservation:
+        return cls(
+            relative_path=str(data.get("relative_path", "")),
+            remote_id=data.get("remote_id"),
+            is_directory=bool(data.get("is_directory", False)),
+            size=data.get("size"),
+            modified_at=data.get("modified_at"),
+            content_hash=data.get("content_hash"),
         )
 
 
@@ -182,7 +247,11 @@ class SourceState:
     display_name: str
     drive_folder_id: str | None = None
     last_scan: OperationProvenance | None = None
+    #: Logical review rows, keyed ``"<folder>|<identity>"`` — including
+    #: DESCRIBED_ABSENT rows that have no file behind them.
     items: dict[str, ItemState] = field(default_factory=dict)
+    #: Files the provider actually reported, keyed by relative path.
+    source_items: dict[str, SourceItemObservation] = field(default_factory=dict)
     #: Sync baselines for the per-folder workbooks under this root.
     artifacts: dict[str, ArtifactSyncState] = field(default_factory=dict)
 
@@ -196,6 +265,10 @@ class SourceState:
             "last_scan": self.last_scan.as_dict() if self.last_scan else None,
             # Sorted so an unchanged archive serialises byte-identically.
             "items": {key: self.items[key].as_dict() for key in sorted(self.items)},
+            "source_items": {
+                key: self.source_items[key].as_dict()
+                for key in sorted(self.source_items)
+            },
             "artifacts": {
                 key: self.artifacts[key].as_dict() for key in sorted(self.artifacts)
             },
@@ -213,6 +286,10 @@ class SourceState:
             items={
                 key: ItemState.from_dict(value)
                 for key, value in (data.get("items") or {}).items()
+            },
+            source_items={
+                key: SourceItemObservation.from_dict(value)
+                for key, value in (data.get("source_items") or {}).items()
             },
             artifacts={
                 key: ArtifactSyncState.from_dict(value)

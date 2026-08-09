@@ -430,8 +430,13 @@ phases exist, without touching the review workbooks.
 
 ## Portable state and clean-machine recovery
 
-**The Google Drive archive must hold enough durable human and machine state to
-resume the project on a clean computer. Local SQLite and cache are disposable.**
+**The archive must hold enough durable human and machine state to resume the
+project on a clean computer. Local SQLite and cache are disposable — but only
+once portable state has been successfully published.**
+
+`python app.py run` refreshes portable state automatically as its final stage,
+after scanning, learning and the dashboard have all succeeded. Portable state
+never describes an archive that was not fully processed.
 
 ```text
 GitHub          code
@@ -456,8 +461,24 @@ Layout under the archive root:
 _archive_state/
 ├── manifest.json      generation, machines, archive-wide artifact baselines
 ├── catalog.json       dictionaries with ids, aliases, coordinates, evidence
-└── sources/<id>.json  per source root: items, hashes, Drive ids, fingerprints
+└── sources/<id>.json  per source root
 ```
+
+Each source file records **two different things**, and recovery needs both:
+
+* `source_items` — the files the provider actually reported;
+* `items` — every logical review row, including `DESCRIBED_ABSENT` rows that
+  have no file behind them, each with the full per-row bookkeeping
+  (`source_hash`, `description_hash`, `suggestion_hash`, `status`,
+  `was_absent`) a rescan compares against.
+
+A folder of 12 photos described by a DOCX naming 24 references yields 12 of the
+first and 24 of the second. Restoring only the files, or only the photo hash,
+would make a recovered machine report the whole archive as changed.
+
+A snapshot **merges into** the previous state. Drive ids, build fingerprints
+and Photos ids cannot be recreated by a scan, so they are carried forward
+rather than overwritten with scan-only data.
 
 No secrets, tokens, local paths, logs, caches or the SQLite file itself are
 ever stored there.
@@ -508,6 +529,11 @@ a freshly bootstrapped machine can tell what is already built without
 rebuilding anything to find out.
 
 ### Optimistic concurrency
+
+A publish is skipped entirely when the deterministic content of the snapshot
+already matches what is stored — provenance alone never bumps the generation.
+(In practice `run` does bump it, because `.xlsx` files are ZIP archives whose
+bytes change on every rewrite even when their content does not.)
 
 `manifest.json` carries a `state_generation`, written last so a manifest at
 generation N implies that generation is complete. A run records the generation

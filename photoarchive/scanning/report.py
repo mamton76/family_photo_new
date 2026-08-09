@@ -254,7 +254,10 @@ def render_local_review_report(results, dictionary, *, verbose: bool = False) ->
         lines.append("(none: no folder contained photos)")
     for result in results:
         lines.append(f"[folder] {result.folder_path or ROOT_FOLDER_LABEL}")
-        lines.append(f"workbook: {result.workbook_path}")
+        lines.append(
+            f"workbook: {result.workbook_path}"
+            f"{'' if result.written else '  (unchanged, not rewritten)'}"
+        )
         lines.append(
             f"rows: {result.rows}  previews: {result.previews}  "
             f"DESCRIBED_ABSENT: {result.absent_rows}"

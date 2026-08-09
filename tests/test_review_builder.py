@@ -316,3 +316,46 @@ def test_unparseable_map_link_leaves_latlon_alone() -> None:
     assert updated.latlon == "55.700000, 37.600000"
     assert "could not be parsed" in updated.review_reason
     assert rescan.map_links_unparsed == ["020"]
+
+
+# -- An unreadable description must not look like missing photos ------------
+
+
+def test_unreadable_description_does_not_mark_rows_missing() -> None:
+    # A DOCX that fails to download leaves no entries. Treating that as "every
+    # described photo disappeared" would rewrite a dozen rows on a network blip.
+    outcome, states = _first_scan(photo=False)
+    row = outcome.rows[0]
+    row.date = "1979-02-19"
+
+    rescan, next_states = build_rows(
+        _reconciliation(),
+        {},
+        existing={"020": row},
+        states=states,
+        descriptions_readable=False,
+    )
+
+    assert rescan.went_missing == []
+    assert rescan.unchanged == ["020"]
+    assert rescan.rows[0].status is WorkflowStatus.DESCRIBED_ABSENT
+    assert rescan.rows[0].date == "1979-02-19"
+    # The previous bookkeeping survives, so the next good scan sees no change.
+    assert next_states["020"].description_hash == states["020"].description_hash
+
+
+def test_a_genuinely_missing_photo_is_still_marked() -> None:
+    outcome, states = _first_scan()
+    outcome.rows[0].date = "1981"
+
+    rescan, _ = build_rows(
+        _reconciliation(),
+        {},
+        existing={"020": outcome.rows[0]},
+        states=states,
+        descriptions_readable=True,
+    )
+
+    assert rescan.went_missing == ["020"]
+    assert rescan.rows[0].status is WorkflowStatus.SOURCE_MISSING
+    assert rescan.rows[0].date == "1981"

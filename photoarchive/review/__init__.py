@@ -1,27 +1,10 @@
-"""The ``review.xlsx`` human review surface."""
+"""The ``review.xlsx`` human review surface.
 
-from photoarchive.review.builder import BuildOutcome, RowState, build_rows
-from photoarchive.review.excel import (
-    FINAL_COLUMNS,
-    SUGGESTED_COLUMNS,
-    VISIBLE_COLUMNS,
-    ReviewWorkbookService,
-    build_preview,
-    identity_key,
-)
-from photoarchive.review.model import ReviewRow, join_values, split_values
+Import the submodules directly — :mod:`photoarchive.review.model`,
+:mod:`photoarchive.review.excel`, :mod:`photoarchive.review.builder`.
 
-__all__ = [
-    "BuildOutcome",
-    "FINAL_COLUMNS",
-    "ReviewRow",
-    "ReviewWorkbookService",
-    "RowState",
-    "SUGGESTED_COLUMNS",
-    "VISIBLE_COLUMNS",
-    "build_preview",
-    "build_rows",
-    "identity_key",
-    "join_values",
-    "split_values",
-]
+This package deliberately re-exports nothing. ``builder`` depends on the
+catalog, and the catalog's learning depends on ``review.model``; a convenience
+re-export here turns that into a genuine import cycle whose failure depends on
+which module a test happens to import first.
+"""

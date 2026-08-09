@@ -18,10 +18,11 @@ an Excel edit.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -87,11 +88,18 @@ class CatalogService:
 
     def __init__(self, filename: str = CATALOG_FILENAME) -> None:
         self.filename = filename
+        #: False when the last export left an already-correct file untouched.
+        self.written = True
 
     def export(
         self, store: DictionaryStore, output_dir: Path
     ) -> tuple[Path, CatalogCounts]:
-        """Write ``catalog.xlsx`` and report what it contains."""
+        """Write ``catalog.xlsx``, unless its content is already on disk.
+
+        Like ``review.xlsx``, this is a ZIP container: rewriting it changes the
+        bytes even when the dictionary did not, which would mean a pointless
+        upload and a pointless portable-state generation on every run.
+        """
         dictionary = store.load()
         path = Path(output_dir) / self.filename
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -113,8 +121,14 @@ class CatalogService:
         self._write_places(workbook, store, dictionary)
         self._write_tags(workbook, store, dictionary)
 
+        if _signature(workbook) == _existing_signature(path):
+            workbook.close()
+            self.written = False
+            return path, counts
+
         workbook.save(path)
         workbook.close()
+        self.written = True
         return path, counts
 
     def _write_people(self, workbook, store, dictionary: Dictionary) -> None:
@@ -184,6 +198,33 @@ class CatalogService:
                 },
             )
         _size(sheet, TAGS_COLUMNS)
+
+
+def _signature(workbook) -> str:
+    """Hash every cell of every sheet: the workbook's logical content."""
+    digest = hashlib.sha256()
+    for name in workbook.sheetnames:
+        digest.update(name.encode("utf-8"))
+        for row in workbook[name].iter_rows(values_only=True):
+            for value in row:
+                digest.update(str("" if value is None else value).encode("utf-8"))
+                digest.update(b"\x1f")
+            digest.update(b"\x1e")
+    return digest.hexdigest()
+
+
+def _existing_signature(path: Path) -> str | None:
+    """The signature of the workbook already on disk, if it is readable."""
+    if not Path(path).exists():
+        return None
+    try:
+        workbook = load_workbook(path, read_only=True)
+    except Exception:  # noqa: BLE001 - an unreadable file is simply rewritten
+        return None
+    try:
+        return _signature(workbook)
+    finally:
+        workbook.close()
 
 
 def _join(values) -> str:

@@ -7,8 +7,9 @@ __pycache__/
 .mypy_cache/
 cache/*
 !cache/.gitkeep
-archive.sqlite
-archive.sqlite-journal
+/archive.sqlite
+/archive.sqlite.*
+/archive.sqlite-journal
 config.yaml
 credentials.json
 token.json

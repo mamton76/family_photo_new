@@ -3,6 +3,17 @@
 This is the whole scan pipeline short of the cloud: read Yandex, parse the
 DOCX, suggest, merge with any previous workbook, embed previews and save. It
 writes only to the local output directory — no Google service is contacted.
+
+**Order matters, and it is the transaction.** Every observation a folder needs
+is made before anything is persisted: the listing is materialised, then the
+description is fetched and parsed, and only then are rows merged, the workbook
+saved and row state written. A provider failure during the reads raises before
+any state is recorded, so a source is never left half-new and half-old.
+
+The one failure that cannot abort the run — a folder's DOCX being unreadable
+while the rest of the archive is fine — is handled explicitly rather than
+implicitly: the folder is reported with an error and its rows are left exactly
+as they were. A failed read is never evidence that photos were deleted.
 """
 
 from __future__ import annotations
@@ -29,6 +40,7 @@ from photoarchive.review.excel import (
     WorkbookPreview,
     build_preview,
     identity_key,
+    rows_signature,
 )
 from photoarchive.scanning.report import FolderReport
 from photoarchive.scanning.scanner import destination_path
@@ -63,6 +75,8 @@ class FolderReviewResult:
     candidates: list[str] = field(default_factory=list)
     #: Bookkeeping to persist after the workbook is written.
     states: dict[str, RowState] = field(default_factory=dict)
+    #: False when the workbook was already up to date and left untouched.
+    written: bool = True
 
 
 def suggestions_for(
@@ -110,6 +124,9 @@ def generate_folder_review(
 
     service = ReviewWorkbookService()
     existing = service.read(workbook_path)
+    # The content already on disk. If the merge produces the same thing, the
+    # file is left completely alone: same bytes, same mtime, nothing to upload.
+    previous_signature = rows_signature(list(existing.values()))
 
     previews, photo_hashes = _prepare_previews(
         plan.photos, cache_dir, fetch_photo, source_root, plan.folder_path
@@ -124,9 +141,14 @@ def generate_folder_review(
         # Route B: a Place the reviewer typed is itself a dictionary key for
         # coordinates, which is the only route available without a DOCX.
         place_lookup=lambda value: resolve_place(dictionary, value),
+        # A folder whose DOCX failed to load must not look like a folder whose
+        # photos all vanished.
+        descriptions_readable=folder.error is None,
     )
 
-    service.write(workbook_path, outcome.rows, previews)
+    written = service.write(
+        workbook_path, outcome.rows, previews, previous_signature=previous_signature
+    )
 
     result = FolderReviewResult(
         folder_path=plan.folder_path,
@@ -142,6 +164,7 @@ def generate_folder_review(
         ),
         outcome=outcome,
         states=_states,
+        written=written,
     )
     _count_suggestions(result, outcome, suggestions)
     result.place_lookups = len(outcome.place_lookups)

@@ -181,7 +181,7 @@ output_dir: "./review-output"
 Then the whole local pipeline is:
 
 ```bash
-python app.py run                     # scan all sources → learn → dashboard
+python app.py run                     # scan all sources → learn → dashboard → portable state
 python app.py run --skip-learn        # scan and dashboard only
 python app.py run --skip-dashboard    # scan and learn only
 python app.py run --output-dir ./out  # override the configured directory
@@ -316,7 +316,9 @@ open review-output/review-all.html
 ### On a new or rebuilt machine
 
 `archive.sqlite` and `cache/` are disposable — everything durable lives in Git,
-Yandex and the archive's `_archive_state/`.
+Yandex and the archive's `_archive_state/`, which `run` refreshes automatically
+as its last stage. They are only safe to delete once a `run` has published that
+state successfully.
 
 ```bash
 git clone <repo> && cd family_photo

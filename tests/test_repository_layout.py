@@ -31,8 +31,19 @@ def test_ide_settings_are_ignored() -> None:
 def test_secrets_and_local_state_are_ignored() -> None:
     ignore_rules = (REPOSITORY_ROOT / ".gitignore").read_text(encoding="utf-8").split()
 
-    for rule in ("config.yaml", "credentials.json", "token.json", "archive.sqlite"):
+    for rule in ("config.yaml", "credentials.json", "token.json"):
         assert rule in ignore_rules
+
+
+def test_sqlite_rules_are_anchored_to_the_repository_root() -> None:
+    # Deliberately narrow: `/archive.sqlite*` must not hide a database or a
+    # fixture that lives somewhere else in the tree and ought to be tracked.
+    ignore_rules = (REPOSITORY_ROOT / ".gitignore").read_text(encoding="utf-8").split()
+
+    assert "/archive.sqlite" in ignore_rules
+    assert "/archive.sqlite.*" in ignore_rules
+    assert "archive.sqlite" not in ignore_rules
+    assert not any(rule.startswith("*.sqlite") for rule in ignore_rules)
 
 
 # -- Configured sources ----------------------------------------------------

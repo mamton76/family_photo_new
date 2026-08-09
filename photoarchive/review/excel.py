@@ -20,6 +20,7 @@ visible column.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -137,6 +138,32 @@ def column_index(name: str) -> int:
     return VISIBLE_COLUMNS.index(name) + 1
 
 
+def rows_signature(rows: "list[ReviewRow]") -> str:
+    """Hash the *logical* content of a workbook, ignoring how it is stored.
+
+    An ``.xlsx`` is a ZIP container, so rewriting a workbook whose content did
+    not change still produces different bytes. That would make every run look
+    like an edit: a needless Drive upload and a needless portable-state
+    generation. Comparing content instead of bytes is what lets an unchanged
+    scan leave the file completely alone.
+    """
+    digest = hashlib.sha256()
+    for row in rows:
+        for column in VISIBLE_COLUMNS:
+            if column == "Preview":
+                continue
+            if column == "Filename / Reference":
+                value = row.filename or row.reference
+            elif column == "Status":
+                value = row.status.value
+            else:
+                value = getattr(row, _COLUMN_ATTRIBUTES[column], "") or ""
+            digest.update(str(value).encode("utf-8"))
+            digest.update(b"\x1f")
+        digest.update(b"\x1e")
+    return digest.hexdigest()
+
+
 def identity_key(value: str) -> str:
     """Row identity *within one folder*: the reference without its extension.
 
@@ -227,6 +254,32 @@ class ReviewWorkbookService:
     # -- Writing ----------------------------------------------------------
 
     def write(
+        self,
+        path: Path,
+        rows: list[ReviewRow],
+        previews: dict[str, WorkbookPreview] | None = None,
+        previous_signature: str | None = None,
+    ) -> bool:
+        """Write the workbook, unless its content is already what is on disk.
+
+        Returns whether the file was actually written. Passing
+        ``previous_signature`` from :func:`rows_signature` of the rows read
+        before the merge lets an unchanged scan skip the save entirely, so the
+        file's bytes and mtime stay put.
+        """
+        path = Path(path)
+        if (
+            previous_signature is not None
+            and path.exists()
+            and rows_signature(rows) == previous_signature
+        ):
+            LOG.debug("Workbook unchanged; leaving %s untouched", path)
+            return False
+
+        self._save(path, rows, previews)
+        return True
+
+    def _save(
         self,
         path: Path,
         rows: list[ReviewRow],

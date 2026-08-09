@@ -37,6 +37,12 @@ from photoarchive.dashboard.html import DASHBOARD_FILENAME, write_dashboard
 from photoarchive.dashboard.preview import PreviewProvider
 from photoarchive.portable.bootstrap import bootstrap as bootstrap_state
 from photoarchive.portable.catalog_state import export_catalog
+from photoarchive.portable.exporter import (
+    ScannedSource,
+    build_portable_snapshot,
+    publish_snapshot,
+    scanned_from_state,
+)
 from photoarchive.portable.models import STATE_DIRECTORY
 from photoarchive.portable.provenance import app_commit, load_machine_identity
 from photoarchive.portable.store import (
@@ -325,7 +331,7 @@ def _run_local_review(
     *,
     output_dir: Path,
     verbose: bool,
-) -> int:
+) -> ScannedSource:
     """Generate local review workbooks. Reads Yandex, writes only locally."""
     cache_dir = config.cache.directory
 
@@ -354,12 +360,20 @@ def _run_local_review(
     state.initialize()
     # Remember which Yandex share produced this output folder, so the dashboard
     # can link back to it and previews can be found by root identity.
-    state.register_source_root(source_root)
+    root_id = state.register_source_root(source_root)
+    changes = state.record_listing(root_id, items)
+    LOG.info(
+        "Source listing: new %s, changed %s, missing %s, unchanged %s",
+        len(changes.new), len(changes.changed), len(changes.missing),
+        len(changes.unchanged),
+    )
     dictionary_store = DictionaryStore()
     dictionary_store.initialize()
     dictionary = dictionary_store.load()
 
     results = []
+    row_states: dict[str, dict] = {}
+    workbooks: list[Path] = []
     for folder in report.folders:
         LOG.info("Building review workbook for %r", folder.plan.folder_path or "/")
         existing_states = state.load_row_states(
@@ -378,6 +392,8 @@ def _run_local_review(
             source_root.identity, folder.plan.folder_path, result.states
         )
         results.append(result)
+        row_states[folder.plan.folder_path] = result.states
+        workbooks.append(result.workbook_path)
 
         outcome = result.outcome
         log_summary(
@@ -425,7 +441,14 @@ def _run_local_review(
         f"candidate aliases {catalog_counts.candidate_aliases}, "
         f"candidate coordinates {catalog_counts.candidate_coordinates}"
     )
-    return 0
+    # Hand the scan's own facts back, so portable state can be exported
+    # without asking Yandex for the same listing a second time.
+    return ScannedSource(
+        source_root=source_root,
+        items=items,
+        row_states=row_states,
+        workbooks=workbooks,
+    )
 
 
 def command_dashboard(args: argparse.Namespace, config: AppConfig) -> int:
@@ -495,7 +518,7 @@ def command_run(args: argparse.Namespace, config: AppConfig) -> int:
     cache_dir = config.cache.directory
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    scanned = 0
+    scanned: list[ScannedSource] = []
     for url in urls:
         LOG.info("Scanning %s", url)
         print(f"\n=== scan: {url} ===")
@@ -503,8 +526,9 @@ def command_run(args: argparse.Namespace, config: AppConfig) -> int:
             YandexDiskConfig(public_url=YandexDiskStorage.public_key_from_url(url)),
             cache_dir,
         )
-        _run_local_review(source, config, output_dir=output_dir, verbose=args.verbose)
-        scanned += 1
+        scanned.append(
+            _run_local_review(source, config, output_dir=output_dir, verbose=args.verbose)
+        )
 
     if not args.skip_learn:
         print("\n=== learn ===")
@@ -520,8 +544,87 @@ def command_run(args: argparse.Namespace, config: AppConfig) -> int:
         )
         command_dashboard(dashboard_args, config)
 
-    print(f"\n=== done: {scanned} source(s) scanned ===")
+    # Only once every earlier stage succeeded: portable state must never
+    # describe an archive that was not fully processed.
+    print("\n=== portable state ===")
+    code = _publish_portable_state(scanned, config, output_dir, args.verbose)
+    if code != 0:
+        return code
+
+    print(f"\n=== done: {len(scanned)} source(s) scanned ===")
     return 0
+
+
+def _publish_portable_state(
+    scanned: list[ScannedSource],
+    config: AppConfig,
+    output_dir: Path,
+    verbose: bool,
+) -> int:
+    """Refresh the portable snapshot so a clean machine could take over."""
+    machine = load_machine_identity()
+    commit = app_commit()
+    portable = PortableStateStore(output_dir / STATE_DIRECTORY)
+    dictionary_store = DictionaryStore()
+    dictionary_store.initialize()
+
+    started = portable.read_generation()
+    snapshot = build_portable_snapshot(
+        scanned=scanned,
+        dictionary=dictionary_store,
+        previous=portable.load(),
+        machine=machine,
+        run_id=RUN_ID,
+        commit=commit,
+        catalog_workbook=output_dir / CATALOG_FILENAME,
+    )
+
+    try:
+        generation, written = publish_snapshot(
+            portable, snapshot, machine, RUN_ID, started, commit
+        )
+    except StateConflictError as error:
+        print("REMOTE STATE CHANGED DURING RUN")
+        print(f"  {error}")
+        print("  Local work was not lost and nothing was overwritten.")
+        return 5
+
+    print(f"  location: {portable.root}")
+    print(f"  machine: {machine.label}  app commit: {commit}")
+    if written:
+        print(f"  started generation: {started}  wrote generation: {generation}")
+    else:
+        print(f"  generation: {generation} (unchanged — nothing to publish)")
+    print(f"  sources: {len(snapshot.sources)}")
+    for source in snapshot.sources.values():
+        described = sum(1 for item in source.items.values() if item.description_hash)
+        absent = sum(1 for item in source.items.values() if item.was_absent)
+        files = sum(
+            1 for item in source.source_items.values() if not item.is_directory
+        )
+        print(
+            f"    [{source.display_name}] source files: {files}  "
+            f"row states persisted: {len(source.items)}  "
+            f"described-absent: {absent}  "
+            f"with description hash: {described}"
+        )
+    return 0
+
+
+def _observation_to_item(record: dict) -> RemoteSourceItem:
+    """Turn a stored source-item row back into a provider item."""
+    from photoarchive.portable.provenance import parse_timestamp
+
+    relative_path = str(record.get("relative_path", ""))
+    return RemoteSourceItem(
+        name=relative_path.rsplit("/", 1)[-1],
+        relative_path=relative_path,
+        is_directory=bool(record.get("is_directory")),
+        remote_id=record.get("remote_id"),
+        size=record.get("size"),
+        modified_at=parse_timestamp(record.get("modified_at")),
+        content_hash=record.get("content_hash"),
+    )
 
 
 def command_bootstrap(args: argparse.Namespace, config: AppConfig) -> int:
@@ -566,18 +669,41 @@ def command_bootstrap(args: argparse.Namespace, config: AppConfig) -> int:
                   " generation from local state.")
         return 0
 
-    loaded = portable.load()
+    # Rebuild the snapshot from what the local database actually knows, rather
+    # than republishing whatever the old generation happened to contain — which
+    # is how an empty "sources": {} would otherwise persist forever.
+    scanned = []
+    for root in state.list_source_roots():
+        with state.connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM source_roots WHERE identity = ?", (root.identity,)
+            ).fetchone()
+        items = []
+        if row is not None:
+            items = [
+                _observation_to_item(record)
+                for record in state.load_source_items(int(row["id"]))
+            ]
+        scanned.append(scanned_from_state(state, root, items))
+
+    if not scanned:
+        print()
+        print("No source roots in the local database. Run 'python app.py run' first"
+              " so portable state can describe a real archive.")
+        return 2
+
+    snapshot = build_portable_snapshot(
+        scanned=scanned,
+        dictionary=dictionary_store,
+        previous=portable.load(),
+        machine=machine,
+        run_id=RUN_ID,
+        commit=commit,
+    )
+
     try:
-        generation = portable.publish(
-            PortableArchiveState(
-                manifest=loaded.manifest,
-                sources=loaded.sources,
-                catalog=export_catalog(dictionary_store),
-            ),
-            machine,
-            RUN_ID,
-            expected_generation=started,
-            commit=commit,
+        generation, _written = publish_snapshot(
+            portable, snapshot, machine, RUN_ID, started, commit
         )
     except StateConflictError as error:
         print()

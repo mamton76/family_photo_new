@@ -92,19 +92,23 @@ def _restore_row_states(state: StateRepository, source) -> None:
     whole archive for review; with it, an unchanged source is recognised as
     unchanged.
     """
-    identity = SourceRoot(url=source.source_url, name=source.display_name).identity
+    root_identity = SourceRoot(url=source.source_url, name=source.display_name).identity
     by_folder: dict[str, dict[str, RowState]] = {}
 
     for key, item in source.items.items():
-        folder, _, row_key = key.rpartition("|")
-        by_folder.setdefault(folder, {})[row_key or key] = RowState(
-            identity=row_key or key,
+        folder, separator, remainder = key.partition("|")
+        row_identity = remainder if separator else key
+        by_folder.setdefault(folder if separator else "", {})[row_identity] = RowState(
+            identity=row_identity,
             photo_hash=item.source_hash or "",
+            description_hash=item.description_hash or "",
+            suggestion_hash=item.suggestion_hash or "",
             status=item.status or "",
+            was_absent=item.was_absent,
         )
 
     for folder, rows in by_folder.items():
-        state.save_row_states(identity, folder, rows)
+        state.save_row_states(root_identity, folder, rows)
 
 
 def portable_root(archive_root: Path | str) -> Path:

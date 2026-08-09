@@ -8,7 +8,7 @@ don't restate it here.
 
 - [x] Commit the previous stable milestone
 - [x] Build generated `review-all.html` (`Summary` + `Review`)
-- [x] Portable archive state + clean-machine recovery foundation
+- [x] Portable archive state + clean-machine recovery, wired into `run`
 - [ ] Manually inspect `review.xlsx` + `catalog.xlsx` + `review-all.html` together
 - [ ] Fix UX issues found
 - [ ] Validate People / Tags iterative propagation and catalog curation
@@ -123,6 +123,7 @@ No workbooks in pure intermediate directories.
 - [ ] Sync `review.xlsx` without clobbering reviewer edits
 - [ ] `catalog.xlsx` at the root; decide placement for `review-all.html`
 - [x] Portable `_archive_state/` holding Drive ids, hashes, fingerprints, evidence
+- [x] `run` publishes a complete snapshot; `record_listing` tracks source items
 - [x] Three-way workbook sync rules, generation guard, `bootstrap` command
 - [ ] Wire real Drive upload/download to the sync decisions (rules are done, transport is not)
 - [ ] Record Drive file ids into portable state during upload

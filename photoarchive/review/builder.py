@@ -109,6 +109,7 @@ def build_rows(
     states: dict[str, RowState] | None = None,
     photo_hashes: dict[str, str] | None = None,
     place_lookup: PlaceLookup | None = None,
+    descriptions_readable: bool = True,
 ) -> tuple[BuildOutcome, dict[str, RowState]]:
     """Produce the rows for one folder, merging with what came before.
 
@@ -150,8 +151,20 @@ def build_rows(
 
     # A row we have seen before but that appears in neither list has lost its
     # source. Keep the row and everything the reviewer put in it.
+    #
+    # Unless the folder's description document could not be read: then every
+    # described-but-absent row would look like it had disappeared, and a
+    # momentary network failure would rewrite a dozen rows. An unreadable
+    # description is reported, never acted on.
     for key, previous in existing.items():
         if key in seen:
+            continue
+        if not descriptions_readable:
+            outcome.rows.append(previous)
+            outcome.unchanged.append(key)
+            next_states[key] = states.get(key) or RowState(
+                identity=key, status=previous.status.value
+            )
             continue
         previous.status = WorkflowStatus.SOURCE_MISSING
         previous.review_reason = REASON_SOURCE_MISSING
