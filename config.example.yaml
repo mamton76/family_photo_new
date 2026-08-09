@@ -1,3 +1,23 @@
+# Copy to config.yaml and edit. config.yaml is gitignored.
+
+# The Yandex Disk shares that make up this archive. Listing them here is what
+# lets `python app.py run` process the whole archive in one command.
+#
+# A bare URL is enough; the longer form adds a note for yourself and lets you
+# temporarily skip a folder. The display name always comes from Yandex, so a
+# label here can never send photos to the wrong destination folder.
+sources:
+  - url: "https://disk.yandex.ru/d/cWAy_XDLrIfMsg"
+    label: "Ф-ТоняМам-76-83-разное"
+  - url: "https://disk.yandex.ru/d/cFwfbSEQ7IB37g"
+    label: "Ф-ТоняМам-83-93-школа"
+  # - url: "https://disk.yandex.ru/d/<another-share>"
+  #   label: "not ready yet"
+  #   enabled: false
+
+# Where review.xlsx, catalog.xlsx, review-all.html and _archive_state/ are written.
+output_dir: "./review-output"
+
 google_drive:
   root_folder_id: "1NhmSheM1A6XylV1HAwhq4oqRk5lvZpLY"
 

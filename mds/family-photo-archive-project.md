@@ -428,6 +428,94 @@ buttons.
 Drive and Photos fields are modelled now and populate themselves when those
 phases exist, without touching the review workbooks.
 
+## Portable state and clean-machine recovery
+
+**The Google Drive archive must hold enough durable human and machine state to
+resume the project on a clean computer. Local SQLite and cache are disposable.**
+
+```text
+GitHub          code
+Yandex Disk     source originals and descriptions
+Drive archive   workbooks, dashboard, processed photos, portable state
+local machine   disposable cache and index
+```
+
+Four kinds of state, with different rules:
+
+| | |
+|---|---|
+| `review.xlsx`, `catalog.xlsx` | **human truth** — three-way synchronised |
+| `_archive_state/*.json` | **portable machine truth** — identities, hashes, Drive ids, fingerprints, sync baselines, evidence |
+| processed photos | built artifacts — regenerated when their fingerprint changes |
+| `review-all.html` | generated view |
+| `archive.sqlite`, `cache/` | local acceleration — rebuildable, never the sync primitive |
+
+Layout under the archive root:
+
+```text
+_archive_state/
+├── manifest.json      generation, machines, archive-wide artifact baselines
+├── catalog.json       dictionaries with ids, aliases, coordinates, evidence
+└── sources/<id>.json  per source root: items, hashes, Drive ids, fingerprints
+```
+
+No secrets, tokens, local paths, logs, caches or the SQLite file itself are
+ever stored there.
+
+### Provenance beside every hash
+
+A bare `"last_synced_hash": "8d3f17…"` tells a machine everything and a person
+nothing. Each recorded hash therefore carries who, when, which run and which
+code version:
+
+```json
+"last_sync": {
+  "content_hash": "sha256:8d3f17…",
+  "at": "2026-08-09T10:42:17Z",
+  "machine_id": "7c26e8…", "machine_label": "Tonya MacBook",
+  "run_id": "run-…", "app_commit": "df0fb26"
+}
+```
+
+The commit is suffixed `-dirty` when the working tree had uncommitted changes,
+and is `unknown` when Git metadata is unavailable — never silently presented as
+a clean commit. Machine identity is an opaque local UUID plus a label a person
+chose; it is provenance only, never a correctness key, so a reinstall that
+changes the id breaks nothing.
+
+### Three-way workbook synchronisation
+
+Because people edit workbooks on more than one machine, each editable artifact
+records the content hash both sides last agreed on:
+
+| local vs baseline | remote vs baseline | action |
+|---|---|---|
+| same | same | nothing |
+| changed | same | upload |
+| same | changed | download |
+| **changed** | **changed** | **conflict — overwrite neither** |
+
+There is no automatic `.xlsx` merge: losing an afternoon of review typing is
+worse than asking which copy to keep. Generated artifacts use no such
+ceremony — they are regenerated and replaced.
+
+### Build fingerprints
+
+A processed photo's fingerprint depends on the source content hash, the
+normalised final metadata a build writes, and the build mapping version — and
+on nothing else. Timestamps, machines and run ids are excluded deliberately, so
+a freshly bootstrapped machine can tell what is already built without
+rebuilding anything to find out.
+
+### Optimistic concurrency
+
+`manifest.json` carries a `state_generation`, written last so a manifest at
+generation N implies that generation is complete. A run records the generation
+it started from and re-checks before publishing; if another machine has moved
+it, the run aborts with `REMOTE STATE CHANGED DURING RUN` rather than
+discarding that work. Portable JSON also carries an explicit `schema_version`,
+and state from a newer version is refused rather than half-understood.
+
 ## The Iterative Loop
 
 ```text

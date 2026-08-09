@@ -35,6 +35,15 @@ from photoarchive.catalog.store import DictionaryStore
 from photoarchive.dashboard.aggregate import collect as collect_review_rows
 from photoarchive.dashboard.html import DASHBOARD_FILENAME, write_dashboard
 from photoarchive.dashboard.preview import PreviewProvider
+from photoarchive.portable.bootstrap import bootstrap as bootstrap_state
+from photoarchive.portable.catalog_state import export_catalog
+from photoarchive.portable.models import STATE_DIRECTORY
+from photoarchive.portable.provenance import app_commit, load_machine_identity
+from photoarchive.portable.store import (
+    PortableArchiveState,
+    PortableStateStore,
+    StateConflictError,
+)
 from photoarchive.scanning.local_review import generate_folder_review
 from photoarchive.scanning.report import (
     build_dry_run_report,
@@ -97,7 +106,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scan.add_argument(
         "source_url",
-        help="Public Yandex Disk folder URL, e.g. https://disk.yandex.ru/d/<id>",
+        nargs="?",
+        default=None,
+        help=(
+            "Public Yandex Disk folder URL. Omit it to scan every source "
+            "listed in config.yaml."
+        ),
     )
     scan.add_argument(
         "--dry-run",
@@ -160,6 +174,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dashboard.set_defaults(handler=command_dashboard)
 
+    run = subparsers.add_parser(
+        "run",
+        parents=[common],
+        help="Scan every configured source, learn, and rebuild the dashboard.",
+    )
+    run.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Override the configured output directory.",
+    )
+    run.add_argument(
+        "--skip-learn", action="store_true", help="Do not update the dictionaries."
+    )
+    run.add_argument(
+        "--skip-dashboard", action="store_true", help="Do not rebuild review-all.html."
+    )
+    run.set_defaults(handler=command_run)
+
+    bootstrap = subparsers.add_parser(
+        "bootstrap",
+        parents=[common],
+        help="Rebuild local state from the portable archive state (clean machine).",
+    )
+    bootstrap.add_argument(
+        "--archive",
+        type=Path,
+        default=DEFAULT_REVIEW_DIR,
+        help="Archive root holding _archive_state (default: ./review-output).",
+    )
+    bootstrap.add_argument(
+        "--machine-label",
+        default=None,
+        help="Human label for this machine, e.g. \"Tonya MacBook\".",
+    )
+    bootstrap.add_argument(
+        "--publish",
+        action="store_true",
+        help="Publish current local dictionary state as a new portable generation.",
+    )
+    bootstrap.set_defaults(handler=command_bootstrap)
+
     build = subparsers.add_parser(
         "build",
         parents=[common],
@@ -179,6 +235,19 @@ def command_scan(args: argparse.Namespace, config: AppConfig) -> int:
     """Scan one source root, or inspect it read-only with ``--dry-run``."""
     cache_dir = config.cache.directory
     cache_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.source_url is None:
+        # No URL given: process everything listed in config.yaml.
+        urls = _configured_sources(config)
+        if not urls:
+            return 2
+        for url in urls:
+            print(f"\n=== scan: {url} ===")
+            scoped = argparse.Namespace(**{**vars(args), "source_url": url})
+            code = command_scan(scoped, config)
+            if code != 0:
+                return code
+        return 0
 
     source_url = YandexDiskStorage.public_key_from_url(args.source_url)
     source = YandexDiskStorage(YandexDiskConfig(public_url=source_url), cache_dir)
@@ -397,6 +466,130 @@ def command_dashboard(args: argparse.Namespace, config: AppConfig) -> int:
             f"  [{group.label}] rows {len(group.rows)}  photos {group.present_photos}  "
             f"absent {group.absent_photos}  needs review {group.needs_review}"
         )
+    return 0
+
+
+def _configured_sources(config: AppConfig) -> list[str]:
+    """URLs to process, or an empty list with an explanation printed."""
+    sources = config.enabled_sources
+    if not sources:
+        print(
+            "No sources configured. Add them under 'sources:' in config.yaml, "
+            "or pass a URL: python app.py scan \"<yandex-url>\" --local-review",
+            file=sys.stderr,
+        )
+    return [source.url for source in sources]
+
+
+def command_run(args: argparse.Namespace, config: AppConfig) -> int:
+    """The whole local loop in one command: scan every source, learn, publish.
+
+    Each stage is the same code the individual commands use, so a full run and
+    a hand-driven sequence produce identical results.
+    """
+    urls = _configured_sources(config)
+    if not urls:
+        return 2
+
+    output_dir = args.output_dir or config.output_dir
+    cache_dir = config.cache.directory
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    scanned = 0
+    for url in urls:
+        LOG.info("Scanning %s", url)
+        print(f"\n=== scan: {url} ===")
+        source = YandexDiskStorage(
+            YandexDiskConfig(public_url=YandexDiskStorage.public_key_from_url(url)),
+            cache_dir,
+        )
+        _run_local_review(source, config, output_dir=output_dir, verbose=args.verbose)
+        scanned += 1
+
+    if not args.skip_learn:
+        print("\n=== learn ===")
+        learn_args = argparse.Namespace(
+            source=output_dir, dry_run=False, verbose=args.verbose
+        )
+        command_learn(learn_args, config)
+
+    if not args.skip_dashboard:
+        print("\n=== dashboard ===")
+        dashboard_args = argparse.Namespace(
+            source=output_dir, output=None, verbose=args.verbose
+        )
+        command_dashboard(dashboard_args, config)
+
+    print(f"\n=== done: {scanned} source(s) scanned ===")
+    return 0
+
+
+def command_bootstrap(args: argparse.Namespace, config: AppConfig) -> int:
+    """Rebuild disposable local state from the portable archive state.
+
+    Safe to run repeatedly, and safe to run on a machine that already has a
+    healthy database: entities and rows are restored under their original ids.
+    """
+    machine = load_machine_identity(label=args.machine_label)
+    commit = app_commit()
+    portable = PortableStateStore(args.archive / STATE_DIRECTORY)
+
+    state = StateRepository()
+    dictionary_store = DictionaryStore()
+
+    started = portable.read_generation()
+    result = bootstrap_state(portable, state, dictionary_store)
+
+    print(f"Run: {RUN_ID}")
+    print(f"Machine: {machine.label} ({machine.machine_id[:8]})")
+    print(f"App commit: {commit}")
+    print()
+    print("Portable state:")
+    print(f"  location: {portable.root}")
+    print(f"  generation: {result.generation}")
+    if result.machines:
+        print(f"  machines on record: {', '.join(sorted(result.machines))}")
+    print()
+    print("Restored:")
+    print(f"  source roots: {result.source_roots}")
+    print(f"  items: {result.items}  with Drive ids: {result.drive_ids}"
+          f"  already built: {result.built_items}")
+    counts = result.catalog_counts
+    print(f"  dictionary: people {counts.get('people', 0)}, "
+          f"places {counts.get('places', 0)}, tags {counts.get('tags', 0)}, "
+          f"aliases {counts.get('aliases', 0)}, evidence {counts.get('evidence', 0)}")
+
+    if not args.publish:
+        if not result.restored_anything:
+            print()
+            print("No portable state found. Run with --publish to create the first"
+                  " generation from local state.")
+        return 0
+
+    loaded = portable.load()
+    try:
+        generation = portable.publish(
+            PortableArchiveState(
+                manifest=loaded.manifest,
+                sources=loaded.sources,
+                catalog=export_catalog(dictionary_store),
+            ),
+            machine,
+            RUN_ID,
+            expected_generation=started,
+            commit=commit,
+        )
+    except StateConflictError as error:
+        print()
+        print("REMOTE STATE CHANGED DURING RUN")
+        print(f"  {error}")
+        print("  Local work was not lost and nothing was overwritten.")
+        return 5
+
+    print()
+    print("Portable state:")
+    print(f"  started generation: {started}")
+    print(f"  wrote generation: {generation}")
     return 0
 
 

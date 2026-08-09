@@ -139,10 +139,11 @@ built around the format the real archive actually uses:
 Descriptions are captured as **source text only**. No people, places, dates,
 tags, events or birth years are extracted yet — that is a later phase.
 
-Still to come, and **not** implemented: Google Drive access, `review.xlsx` and
-`catalog.xlsx` generation, EXIF/IPTC/XMP writing (`build`), Google Photos
-publishing (`publish`), and metadata inference (people, places, tags, dates).
-A `scan` without `--dry-run` fails explicitly rather than pretending to work.
+Still to come, and **not** implemented: Google Drive upload/sync,
+EXIF/IPTC/XMP writing (`build`), Google Photos publishing (`publish`), and
+automatic metadata extraction from free text. A plain `scan` — without
+`--dry-run` or `--local-review` — needs Google Drive and fails explicitly
+rather than pretending to work.
 
 ## Setup
 
@@ -151,7 +152,7 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-cp config.example.yaml config.yaml   # then edit root_folder_id
+cp config.example.yaml config.yaml   # then list your Yandex shares under 'sources:'
 ```
 
 `config.yaml`, `credentials.json` and `token.json` are git-ignored: no secrets
@@ -163,15 +164,169 @@ deliberately not a Python dependency.
 
 ## Commands
 
-```bash
-python app.py scan "https://disk.yandex.ru/d/<id>" --dry-run   # works today
-python app.py scan "https://disk.yandex.ru/d/<id>"             # needs Google Drive
-python app.py learn      # not implemented yet
-python app.py build      # not implemented yet
-python app.py publish    # not implemented yet
+### One command
+
+List your Yandex shares once in `config.yaml`:
+
+```yaml
+sources:
+  - url: "https://disk.yandex.ru/d/cWAy_XDLrIfMsg"
+    label: "Ф-ТоняМам-76-83-разное"
+  - url: "https://disk.yandex.ru/d/cFwfbSEQ7IB37g"
+    label: "Ф-ТоняМам-83-93-школа"
+
+output_dir: "./review-output"
 ```
 
-Unimplemented commands fail explicitly instead of reporting false success.
+Then the whole local pipeline is:
+
+```bash
+python app.py run                     # scan all sources → learn → dashboard
+python app.py run --skip-learn        # scan and dashboard only
+python app.py run --skip-dashboard    # scan and learn only
+python app.py run --output-dir ./out  # override the configured directory
+```
+
+Safe to repeat: an unchanged run changes nothing, and it never overwrites a
+final value you typed.
+
+A bare URL works too, and `enabled: false` skips a folder without deleting it:
+
+```yaml
+sources:
+  - "https://disk.yandex.ru/d/abc"
+  - url: "https://disk.yandex.ru/d/def"
+    enabled: false
+```
+
+`scan` with no URL does the same across every configured source:
+
+```bash
+python app.py scan --local-review
+```
+
+### The steps behind it
+
+`run` is exactly these commands in order — use them individually when you want
+one stage at a time:
+
+```bash
+# 1. Read Yandex, generate/refresh per-folder review.xlsx with previews
+python app.py scan "https://disk.yandex.ru/d/<id>" --local-review
+
+# 2. …edit review.xlsx by hand: People, Place, LatLon, Tags, Map Link…
+
+# 3. Teach the dictionaries from what you typed, refresh catalog.xlsx
+python app.py learn
+
+# 4. Scan again — the dictionary now fills blank fields it can
+python app.py scan "https://disk.yandex.ru/d/<id>" --local-review
+
+# 5. Regenerate the read-only dashboard covering the whole archive
+python app.py dashboard
+```
+
+Steps 3–5 are safe to repeat as often as you like: an unchanged run adds
+nothing and overwrites nothing.
+
+### Every command
+
+```bash
+# --- everything at once ----------------------------------------------------
+python app.py run                                      # scan all sources → learn → dashboard
+python app.py run --skip-learn                         # scan and dashboard only
+python app.py run --skip-dashboard                     # scan and learn only
+python app.py run --output-dir ./out                   # override the configured directory
+
+# --- inspect ---------------------------------------------------------------
+python app.py scan "<yandex-url>" --dry-run            # read-only report, writes nothing
+python app.py --verbose scan "<yandex-url>" --dry-run  # + per-entry detail
+
+# --- review workbooks ------------------------------------------------------
+python app.py scan "<yandex-url>" --local-review
+python app.py scan --local-review                      # every configured source
+python app.py scan "<yandex-url>" --local-review --output-dir ./review-output
+python app.py scan "<yandex-url>"                      # plain scan: needs Google Drive (not implemented)
+
+# --- dictionaries ----------------------------------------------------------
+python app.py learn                                    # reads ./review-output
+python app.py learn --source ./review-output
+python app.py learn --dry-run                          # propose without writing
+python app.py --verbose learn
+
+# --- dashboard -------------------------------------------------------------
+python app.py dashboard                                # -> review-output/review-all.html
+python app.py dashboard --source ./review-output --output ./review-all.html
+
+# --- portable state / new machine -----------------------------------------
+python app.py bootstrap                                # rebuild local state from _archive_state
+python app.py bootstrap --machine-label "Tonya MacBook"
+python app.py bootstrap --publish                      # publish a new state generation
+python app.py bootstrap --archive ./review-output
+
+# --- not implemented yet ---------------------------------------------------
+python app.py build                                    # EXIF/IPTC/XMP into processed copies
+python app.py publish                                  # upload to Google Photos
+```
+
+Unimplemented commands fail explicitly (exit code 3) instead of reporting false
+success.
+
+### Global options
+
+Valid before or after the subcommand:
+
+```bash
+python app.py --config ./config.yaml scan "<yandex-url>" --local-review
+python app.py --log-dir ./logs learn
+python app.py --verbose dashboard
+```
+
+| Option | Meaning |
+|---|---|
+| `--config PATH` | Config file (default `./config.yaml`, then `config.example.yaml`) |
+| `--verbose`, `-v` | Debug logging on the console and per-entry report detail |
+| `--log-dir PATH` | Where the per-run DEBUG log goes (default `./logs`) |
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | Unexpected error — see the log path printed on stderr |
+| `2` | Configuration problem |
+| `3` | Command not implemented yet |
+| `4` | Storage/network failure (e.g. Yandex unreachable) |
+| `5` | Portable state changed remotely during the run; nothing overwritten |
+
+### A first run, end to end
+
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp config.example.yaml config.yaml
+
+# add your Yandex shares under 'sources:' in config.yaml, then:
+python app.py run
+open review-output/<source-folder>/review.xlsx     # edit metadata by hand
+python app.py run                                  # learn from the edits, refresh
+open review-output/review-all.html
+```
+
+### On a new or rebuilt machine
+
+`archive.sqlite` and `cache/` are disposable — everything durable lives in Git,
+Yandex and the archive's `_archive_state/`.
+
+```bash
+git clone <repo> && cd family_photo
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp config.example.yaml config.yaml
+
+python app.py bootstrap --machine-label "Home PC"     # restore dictionaries, ids, fingerprints
+python app.py run
+```
 
 ## Tests
 

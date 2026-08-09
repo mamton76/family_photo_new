@@ -33,3 +33,93 @@ def test_secrets_and_local_state_are_ignored() -> None:
 
     for rule in ("config.yaml", "credentials.json", "token.json", "archive.sqlite"):
         assert rule in ignore_rules
+
+
+# -- Configured sources ----------------------------------------------------
+
+
+def _config(text: str):
+    import yaml
+
+    from photoarchive.config import AppConfig
+
+    return AppConfig.from_mapping(yaml.safe_load(text))
+
+
+def test_sources_accept_bare_urls() -> None:
+    config = _config(
+        """
+        google_drive: {root_folder_id: "abc"}
+        sources:
+          - "https://disk.yandex.ru/d/one"
+          - "https://disk.yandex.ru/d/two"
+        """
+    )
+
+    assert [source.url for source in config.sources] == [
+        "https://disk.yandex.ru/d/one",
+        "https://disk.yandex.ru/d/two",
+    ]
+    assert all(source.enabled for source in config.sources)
+
+
+def test_sources_accept_full_entries() -> None:
+    config = _config(
+        """
+        google_drive: {root_folder_id: "abc"}
+        sources:
+          - url: "https://disk.yandex.ru/d/one"
+            label: "School years"
+          - url: "https://disk.yandex.ru/d/two"
+            enabled: false
+        """
+    )
+
+    assert config.sources[0].label == "School years"
+    assert config.sources[1].enabled is False
+    assert [source.url for source in config.enabled_sources] == [
+        "https://disk.yandex.ru/d/one"
+    ]
+
+
+def test_missing_sources_is_not_an_error() -> None:
+    config = _config('google_drive: {root_folder_id: "abc"}')
+
+    assert config.sources == ()
+    assert config.enabled_sources == ()
+
+
+def test_a_source_without_a_url_is_rejected() -> None:
+    import pytest
+
+    from photoarchive.config import ConfigError
+
+    with pytest.raises(ConfigError, match="no url"):
+        _config(
+            """
+            google_drive: {root_folder_id: "abc"}
+            sources:
+              - label: "forgot the url"
+            """
+        )
+
+
+def test_output_dir_is_configurable() -> None:
+    from pathlib import Path
+
+    config = _config(
+        'google_drive: {root_folder_id: "abc"}\noutput_dir: "./somewhere"'
+    )
+
+    assert config.output_dir == Path("./somewhere")
+
+
+def test_example_config_lists_real_sources() -> None:
+    from photoarchive.config import AppConfig
+
+    config = AppConfig.load(REPOSITORY_ROOT / "config.example.yaml")
+
+    assert len(config.enabled_sources) >= 1
+    assert all(
+        source.url.startswith("https://disk.yandex.") for source in config.sources
+    )
