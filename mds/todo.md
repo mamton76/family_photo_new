@@ -187,6 +187,12 @@ implemented.
 
 ## 10. Google Photos publishing
 
+**Before starting this section**, resolve the open sync/republish design
+questions in
+[`to-discuss-google-photos-sync.md`](to-discuss-google-photos-sync.md) —
+lifecycle vs. sync status, manual-approval invalidation, republish intent,
+album semantics. Not yet implemented; do not implement without revisiting it.
+
 - [ ] **Re-check current API capabilities first** — don't rely on old assumptions
 - [ ] Auth; upload only built copies; albums from final `Albums`
 - [ ] Persist media ids, never upload twice; error handling and retries
@@ -198,7 +204,8 @@ metadata does not train Google's face identities.
 
 - [ ] When a row becomes `APPROVED` (never set automatically today)
 - [ ] `build` → `BUILT`; `publish` → `PUBLISHED`
-- [ ] Source changing after `BUILT`/`PUBLISHED`; rebuild/republish policy
+- [ ] Source changing after `BUILT`/`PUBLISHED`; rebuild/republish policy —
+      see `to-discuss-google-photos-sync.md`
 - [ ] `SKIP` and `SOURCE_MISSING` follow-up
 - [ ] Keep diagnostics in `Review Reason`, not `Status`
 
