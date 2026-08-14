@@ -302,7 +302,22 @@ def command_scan(args: argparse.Namespace, config: AppConfig) -> int:
         scanner = Scanner(
             config=config, source=source, destination=destination, state=state
         )
-        scanner.scan(source_root)
+        try:
+            scanner.scan(source_root)
+        except NotImplementedError:
+            # A plain scan mirrors to Google Drive, and that transport is not
+            # written yet. Say so in the reader's terms, and point at the two
+            # commands that do work today.
+            LOG.info("Drive transport missing; scan cannot complete", exc_info=True)
+            print(
+                "scan: the Google Drive transport is not wired up yet, so a "
+                "full scan cannot finish.\n"
+                "  scan <url> --local-review   write review.xlsx locally\n"
+                "  scan <url> --dry-run        inspect the source, write nothing\n"
+                "  run                         the whole local loop, every source",
+                file=sys.stderr,
+            )
+            return 3
     finally:
         source.close()
     return 0

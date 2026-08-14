@@ -166,13 +166,10 @@ def build_rows(
                 identity=key, status=previous.status.value
             )
             continue
-        previous.status = WorkflowStatus.SOURCE_MISSING
-        previous.review_reason = REASON_SOURCE_MISSING
+        _flag(previous, WorkflowStatus.SOURCE_MISSING, REASON_SOURCE_MISSING)
         outcome.rows.append(previous)
         outcome.went_missing.append(key)
-        next_states[key] = RowState(
-            identity=key, status=WorkflowStatus.SOURCE_MISSING.value
-        )
+        next_states[key] = RowState(identity=key, status=previous.status.value)
 
     return outcome, next_states
 
@@ -240,23 +237,23 @@ def _build_entry_row(
     photo_moved = bool(previous) and bool(photo_hash) and previous.photo_hash != photo_hash
 
     if was_absent and photo is not None:
-        row.status = WorkflowStatus.REVIEW
-        row.review_reason = REASON_PREVIOUSLY_ABSENT_FOUND
+        _flag(row, WorkflowStatus.REVIEW, REASON_PREVIOUSLY_ABSENT_FOUND)
         outcome.became_present.append(key)
     elif photo_moved:
-        row.status = WorkflowStatus.REVIEW
-        row.review_reason = REASON_SOURCE_PHOTO_CHANGED
+        _flag(row, WorkflowStatus.REVIEW, REASON_SOURCE_PHOTO_CHANGED)
         outcome.photo_changed.append(key)
     elif description_moved:
         approved = _status_of(previous, row) in _REVIEWED_STATUSES
-        row.status = WorkflowStatus.REVIEW
-        row.review_reason = (
+        _flag(
+            row,
+            WorkflowStatus.REVIEW,
             REASON_DESCRIPTION_CHANGED_AFTER_APPROVAL if approved
-            else REASON_DESCRIPTION_CHANGED
+            else REASON_DESCRIPTION_CHANGED,
         )
         outcome.description_changed.append(key)
     elif photo is None:
-        row.status = WorkflowStatus.DESCRIBED_ABSENT
+        if row.status is not WorkflowStatus.SKIP:
+            row.status = WorkflowStatus.DESCRIBED_ABSENT
         outcome.unchanged.append(key)
     else:
         outcome.unchanged.append(key)
@@ -311,8 +308,7 @@ def _build_photo_row(
     _apply_map_link(row, outcome, key)
 
     if previous and photo_hash and previous.photo_hash != photo_hash:
-        row.status = WorkflowStatus.REVIEW
-        row.review_reason = REASON_SOURCE_PHOTO_CHANGED
+        _flag(row, WorkflowStatus.REVIEW, REASON_SOURCE_PHOTO_CHANGED)
         outcome.photo_changed.append(key)
     else:
         outcome.unchanged.append(key)
@@ -429,6 +425,20 @@ def _apply_map_link(row: ReviewRow, outcome: BuildOutcome, key: str) -> None:
     row.latlon = formatted
     row.review_reason = REASON_MAP_LINK_APPLIED
     outcome.map_links_applied.append(key)
+
+
+def _flag(row: ReviewRow, status: WorkflowStatus, reason: str) -> None:
+    """Record why a row changed, and move it to ``status`` — unless it is SKIP.
+
+    ``SKIP`` is a person saying *do not archive this photograph*. It is about
+    the photo itself, not about its description, so neither a rewritten DOCX
+    entry nor a re-scanned image overturns it. The change is still reported in
+    ``Review Reason``, so the decision can be revisited deliberately rather
+    than reversed silently.
+    """
+    row.review_reason = reason
+    if row.status is not WorkflowStatus.SKIP:
+        row.status = status
 
 
 def _status_of(previous: RowState | None, row: ReviewRow) -> WorkflowStatus:

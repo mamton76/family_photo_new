@@ -14,6 +14,7 @@ from photoarchive.review.model import (
     REASON_DESCRIPTION_CHANGED,
     REASON_DESCRIPTION_CHANGED_AFTER_APPROVAL,
     REASON_PREVIOUSLY_ABSENT_FOUND,
+    REASON_SOURCE_MISSING,
     REASON_SOURCE_PHOTO_CHANGED,
 )
 
@@ -359,3 +360,104 @@ def test_a_genuinely_missing_photo_is_still_marked() -> None:
     assert rescan.went_missing == ["020"]
     assert rescan.rows[0].status is WorkflowStatus.SOURCE_MISSING
     assert rescan.rows[0].date == "1981"
+
+
+# -- SKIP is a decision, not a state the pipeline may revise ---------------
+
+
+def test_changed_description_reports_but_does_not_unskip() -> None:
+    outcome, states = _first_scan(text="старое описание")
+    row = outcome.rows[0]
+    row.status = WorkflowStatus.SKIP
+    states["020"].status = WorkflowStatus.SKIP.value
+
+    rescan, _ = build_rows(
+        _reconciliation((_entry("020", "новое описание"), _photo("020.jpg"))),
+        {"020": SUGGESTION},
+        existing={"020": row},
+        states=states,
+    )
+
+    updated = rescan.rows[0]
+    assert updated.status is WorkflowStatus.SKIP
+    assert updated.review_reason == REASON_DESCRIPTION_CHANGED
+    # The change itself is still reported, so it can be reconsidered.
+    assert rescan.description_changed == ["020"]
+
+
+def test_changed_image_reports_but_does_not_unskip() -> None:
+    reconciliation = _reconciliation((_entry("020"), _photo("020.jpg")))
+    outcome, states = build_rows(
+        reconciliation, {"020": SUGGESTION}, photo_hashes={"020": "hash-one"}
+    )
+    row = outcome.rows[0]
+    row.status = WorkflowStatus.SKIP
+
+    rescan, _ = build_rows(
+        reconciliation,
+        {"020": SUGGESTION},
+        existing={"020": row},
+        states=states,
+        photo_hashes={"020": "hash-two"},
+    )
+
+    assert rescan.rows[0].status is WorkflowStatus.SKIP
+    assert rescan.rows[0].review_reason == REASON_SOURCE_PHOTO_CHANGED
+    assert rescan.photo_changed == ["020"]
+
+
+def test_changed_image_does_not_unskip_an_undescribed_photo() -> None:
+    reconciliation = _reconciliation(undescribed=[_photo("021.jpg")])
+    outcome, states = build_rows(
+        reconciliation, {}, photo_hashes={"021": "hash-one"}
+    )
+    row = outcome.rows[0]
+    row.status = WorkflowStatus.SKIP
+
+    rescan, _ = build_rows(
+        reconciliation,
+        {},
+        existing={"021": row},
+        states=states,
+        photo_hashes={"021": "hash-two"},
+    )
+
+    assert rescan.rows[0].status is WorkflowStatus.SKIP
+    assert rescan.rows[0].review_reason == REASON_SOURCE_PHOTO_CHANGED
+
+
+def test_missing_photo_reports_but_does_not_unskip() -> None:
+    outcome, states = _first_scan()
+    row = outcome.rows[0]
+    row.status = WorkflowStatus.SKIP
+
+    rescan, next_states = build_rows(
+        _reconciliation(),
+        {},
+        existing={"020": row},
+        states=states,
+        descriptions_readable=True,
+    )
+
+    assert rescan.rows[0].status is WorkflowStatus.SKIP
+    assert rescan.rows[0].review_reason == REASON_SOURCE_MISSING
+    assert rescan.went_missing == ["020"]
+    # The recorded state agrees with the row, rather than claiming SOURCE_MISSING.
+    assert next_states["020"].status == WorkflowStatus.SKIP.value
+
+
+def test_skip_still_survives_when_a_described_photo_returns() -> None:
+    outcome, states = _first_scan(photo=False)
+    row = outcome.rows[0]
+    assert row.status is WorkflowStatus.DESCRIBED_ABSENT
+    row.status = WorkflowStatus.SKIP
+
+    rescan, _ = build_rows(
+        _reconciliation((_entry("020"), _photo("020.jpg"))),
+        {"020": SUGGESTION},
+        existing={"020": row},
+        states=states,
+    )
+
+    assert rescan.rows[0].status is WorkflowStatus.SKIP
+    assert rescan.rows[0].review_reason == REASON_PREVIOUSLY_ABSENT_FOUND

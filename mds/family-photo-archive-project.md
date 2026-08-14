@@ -207,7 +207,28 @@ An unparsable link changes nothing and says so in `Review Reason`.
   digital file is missing.
 - **Review Reason** — why a row needs another look: `Description changed`,
   `Description changed after approval`, `Source photo changed`,
-  `Previously absent photo found`, or a `Map Link` outcome.
+  `Previously absent photo found`, `Photo returned`, or a `Map Link` outcome.
+
+#### Stale source text
+
+When a description document disappears, or an entry is removed from it, the
+photo keeps its row and the source columns keep yesterday's text. That text is
+**kept and marked stale**, not silently erased: it is the last thing the source
+said about this photo, and losing it because a document was reorganised would
+be a real loss.
+
+Staleness is **derived, not stored** — the same principle as coverage. A row
+whose `source_entry_exists` is false while its source columns are non-empty is
+stale by definition, so no new persisted fact is needed and the flag clears by
+itself when the entry comes back.
+
+Two consequences to hold together:
+
+- Coverage is unaffected: `source_entry_exists` stays authoritative, so such a
+  photo is `NO_ENTRY` however much text sits beside it.
+- The reviewer must be told, or the workbook contradicts the dashboard. The
+  diagnostic belongs in `Review Reason`, and saying so does not by itself
+  change `Status`.
 
 ### Place and LatLon are one linked concept
 
@@ -300,6 +321,80 @@ this folder. The row exists with no preview and keeps its description, so the
 photo can be looked for later. It is distinct from `SOURCE_MISSING`, which
 means a photo the pipeline saw before has since disappeared.
 
+#### `APPROVED` is a human act
+
+**Only a person sets `APPROVED`, by typing it in the `Status` column.** The
+pipeline never sets it, and never infers it from how full a row looks: "every
+final field is non-empty" is the machine's opinion about completeness, which is
+a different statement from a reviewer saying *this row is done*. The workbook
+is already built for this — `Status` is a human-owned column in
+`REVIEW_HUMAN_FIELDS`, so an approval survives a three-way merge, and the scan
+re-applies its own lifecycle transitions afterwards.
+
+Consistently with that, **nothing validates an approved row's completeness.**
+Empty finals are legitimate: a date may be genuinely unknown, and the build
+already treats unsupported precision as non-fatal. `build` writes what the row
+has and reports what it wrote; it does not refuse a row because a person
+approved it with fields the person chose to leave empty.
+
+One rule is physical rather than editorial: a row with no photo behind it
+(`DESCRIBED_ABSENT`, `SOURCE_MISSING`) is never built, whatever its status.
+That is not validation of the human's decision — there is simply no file.
+
+`APPROVED` is **not** a precondition for learning. A reviewer who typed a name
+into `People` on a `REVIEW` row has stated a fact just as firmly; only `ERROR`
+and `SKIP` rows are excluded (`catalog/learning.py`).
+
+#### What invalidates an approval
+
+Source change does, and already works: a changed photo or changed description
+demotes the row to `REVIEW` with a distinct reason, including a separate reason
+for a description that changed *after* approval.
+
+Human editing does not. Before `BUILT`, the reviewer owns both the metadata and
+the status, so there is nothing to revoke — editing `Place` on an approved row
+is just more reviewing. After `BUILT` the same edit means something different:
+the built file no longer matches the metadata, so it needs a **rebuild**. That
+is a separate dimension from lifecycle status, in the same spirit as the sync
+status described under "Publication identity, drift and republishing", and it
+needs change
+detection over the final fields that no state currently keeps.
+
+Bulk approval is Excel's job for now: fill-down over the `Status` column
+already works and already survives a merge. A CLI `approve` is only worth
+adding if that becomes painful in practice.
+
+#### `SKIP` is terminal
+
+`SKIP` is the one status by which a person says *do not archive this photo*,
+and a scan never takes it back. It applies to the **photograph**, not to its
+description, so a changed description cannot possibly bear on it — and a
+changed image does not either: the reviewer excluded this photo, not this
+revision of it.
+
+The change is still reported: it goes into `Review Reason`, where the person
+can see it and reconsider deliberately. This needs an explicit guard the
+builder does not have today — the `photo_changed` and `description_changed`
+branches currently overwrite `Status` unconditionally, which quietly resurrects
+a skipped photo.
+
+`APPROVED` deliberately behaves the other way round: a source change demotes it
+to `REVIEW`, because approval is a statement about content the source has since
+altered.
+
+#### A photo that comes back
+
+`SOURCE_MISSING` keeps the row and everything the reviewer put in it. If the
+file reappears, the row returns to `REVIEW` with its own reason — **`Photo
+returned`** — not with `Source photo changed`, which would describe something
+that did not happen. `DESCRIBED_ABSENT` already has such a reason
+(`Previously absent photo found`); this is the same idea for a photo the
+pipeline once saw.
+
+The previous status is not restored. A file at the same path is not
+necessarily the same photograph, so the reviewer confirms rather than the
+pipeline assuming.
+
 ### Row identity
 
 A row is identified by source root + relative folder + reference stem. The
@@ -307,6 +402,94 @@ stem alone is not an identity: `folder A/001.jpg` and `folder B/001.jpg` are
 different photos. Within one folder, `20200512_150442` and
 `20200512_150442.jpg` are the same row, so a `DESCRIBED_ABSENT` row is reused
 when its photo appears rather than duplicated.
+
+### When a photo moves between folders
+
+Because identity is folder-scoped, a photo moved in the source looks like a
+disappearance plus an arrival: the reviewed metadata is stranded on a
+`SOURCE_MISSING` row while a blank `NEW` row appears elsewhere. Worse, portable
+`ItemState` is keyed the same way and carries `drive_file_id`,
+`build_fingerprint` and `google_photos_media_id`, so a moved photo would look
+new to Drive and to Google Photos — the duplicate-publication hazard.
+
+Re-linking is therefore a **separate, archive-wide reconciliation pass**, not
+logic inside `scan`. `scan` sees one source root at a time and cannot recognise
+a cross-root move; the pass reads durable state across the whole archive and
+needs no provider access, because the identity signals are already recorded.
+
+#### Two identity signals, verified against the real source
+
+A public folder listing returns `resource_id`, `md5` **and** `sha256` for every
+item, so both signals are available for the whole archive without downloading
+anything.
+
+1. **`resource_id`** — the provider's identity for a *file object*, of the form
+   `<disk-id>:<hash>`. Two files with byte-identical content have **different**
+   `resource_id`s (verified on real data: same name, same md5, same sha256, two
+   distinct ids), so this is not a content hash — it is the file itself.
+2. **`sha256`** — content identity. The provider's value is byte-identical to
+   what `_file_hash` computes locally (verified), so there is one comparable
+   content key across the archive, whether or not a photo was ever downloaded.
+
+3. **Filename** — the weakest signal, and the only one that survives a
+   re-upload. It cannot be an identity by itself: identical filenames in
+   different folders are an expected condition.
+
+The three answer different questions, which is why all three are needed.
+Verified against the real source:
+
+| Event | `resource_id` | `sha256` | filename |
+| --- | --- | --- | --- |
+| Photo moved | **preserved** | preserved | preserved |
+| Photo copied | new | preserved | preserved |
+| Photo re-uploaded (rescanned) | new | new | **preserved** |
+
+A move preserving `resource_id` was confirmed by moving a real file and
+re-querying it: same id, `created` unchanged, `modified` bumped. That makes
+`resource_id` the primary key for re-linking, with `sha256` behind it.
+
+The re-upload row is why filename matching stays in the design rather than
+being demoted to corroboration: when a photo is rescanned and re-uploaded into
+a different folder, both strong signals change at once and the name is all that
+is left. Such a match is proposed and never applied automatically — one name in
+two folders may be two photographs.
+
+Implementation note: `_parse_item` currently keeps only the first of
+`md5`/`sha256` and so discards the comparable digest. Record `sha256`, or both.
+
+#### Findings, and what each one means
+
+| Finding | Condition | Treatment |
+| --- | --- | --- |
+| **Moved photo** | same content gone from A, present in B | propose a move |
+| **True duplicate** | same image in two places *at once* | **report only** — a source problem for a human to fix, like an ambiguous description document. No primary/duplicate model in the archive |
+| **Orphan description** | `DESCRIBED_ABSENT` in A whose photo sits in B | propose a cross-folder link |
+
+A cross-folder description link is an explicit exception to
+`description_scope: current_folder`, so it is **only ever applied by hand** —
+never automatically, or the scope rule would quietly stop meaning anything.
+
+#### Proposing and applying
+
+Findings are shown in `review-all.html`, with previews of both sides, because
+seeing the two photographs is most of the decision. The decision itself is
+entered in a **proposals workbook**, the way `resolve-conflicts` already works:
+the dashboard stays read-only and the workbook stays the place where a human
+states things.
+
+When a move is confirmed, **everything follows the photo** — reviewed finals,
+`Status`, and the portable `ItemState` with its Drive id, build fingerprint and
+Photos media id. That is the entire point: identity follows the photograph, so
+a moved photo is never rebuilt or republished as if it were new.
+
+A confirmed link is reversible, and a **rejected proposal is durable** — the
+pass must not offer the same pairing again, exactly as a rejected dictionary
+alias is never re-proposed. Every applied link records evidence: which signal
+matched, and what was joined to what. A move rewrites row identity, the most
+load-bearing concept in the archive, so it is never silent.
+
+A whole folder moving is recognised as one pattern and proposed as a single
+action, rather than as fifty unrelated coincidences.
 
 ## Description Documents
 
@@ -318,6 +501,76 @@ This rule is not configurable.
 A new description entry starts at a paragraph beginning with a photo
 reference; following paragraphs belong to it.
 
+### Source-description coverage
+
+The Yandex photos decide what exists; the DOCX only describes it. Every
+physical photo therefore gets a normal, editable `review.xlsx` row — whatever
+the description says or fails to say. **Coverage describes the quality and
+structure of the source material; it never decides whether a photo gets a
+review row, and never gates the workflow.** A photo with no description is
+reviewed, approved, built and published like any other once its final metadata
+is filled in by hand.
+
+Folder level — persisted in portable state, so the dashboard can report
+coverage without rescanning Yandex:
+
+| `FolderDescriptionStatus` | Meaning |
+| --- | --- |
+| `FOUND` | exactly one usable `.docx`, parsed |
+| `ABSENT` | observed, no description document |
+| `AMBIGUOUS` | several `.docx`, none selected — a fixable source problem |
+| `UNKNOWN` | not yet observed |
+
+`UNKNOWN` describes *our records*, never the source. A completed scan must
+never write it, a rescan must always resolve it, and it is never rendered as a
+warning. `ABSENT` is deliberately not called *missing*: nothing was lost, and
+`SOURCE_MISSING` keeps that meaning.
+
+Photo level — **derived, never persisted**, and assigned only when the folder
+is `FOUND`. For `ABSENT`, `AMBIGUOUS` and `UNKNOWN` no synthetic per-photo
+value is produced at all; those folders are explained from folder state.
+
+| `PhotoDescriptionCoverage` | Meaning |
+| --- | --- |
+| `DESCRIBED` | the entry has photo-specific descriptive content |
+| `CONTEXT_ONLY` | entry exists, but only inherits `section_context` |
+| `ENTRY_EMPTY` | entry exists with no content and no inherited context |
+| `NO_ENTRY` | a document was selected and parsed, and has no matching entry |
+
+`NO_ENTRY` never means "there was no document" — that is folder state.
+Stretching it would make one value mean two things.
+
+What counts as described: **at least one semantically descriptive,
+photo-specific content element**. Currently entry text qualifies; inherited
+`section_context` does not, because a divider passes the same context to every
+entry beneath it and so is never evidence about one photo; source notes do not,
+because today's only note (`нет фото`) states source state, not history. Every
+new recognised source-note pattern must carry an explicit semantic class
+(`SOURCE_STATE` / `DESCRIPTIVE`), and coverage may use a note only if its class
+says so. Never "some field is non-empty".
+
+Derivation inputs, all durable: the folder record, a per-row
+`source_entry_exists` observation, and the workbook's `Source Description`,
+`Section Context` and `Source Notes` columns. Because the classification itself
+is never stored, changing the policy needs no migration and no policy version.
+`source_entry_exists` is **authoritative**: a row that lost its entry may still
+carry stale source text.
+
+Dashboard reporting is per folder; there is no archive-wide coverage count,
+because the actionable unit is the folder.
+
+```text
+FOUND      47 photos · 39 described · 8 need description
+           breakdown on demand: 3 context only · 2 empty entries · 3 no entry
+ABSENT     47 photos · description document: absent
+AMBIGUOUS  47 photos · description document: ambiguous · coverage unresolved
+UNKNOWN    47 photos · description coverage: not yet observed
+```
+
+`DESCRIBED` counts as *described*; the other three as *need description*.
+`AMBIGUOUS` is unresolved rather than counted, and visibly actionable — the
+source can be fixed. `UNKNOWN` photos enter neither bucket.
+
 ## Dictionaries and `catalog.xlsx`
 
 `People`, `Places` and `Tags` live in `archive.sqlite` and are exported to an
@@ -328,11 +581,52 @@ reference; following paragraphs belong to it.
 - **CONFIRMED** knowledge may drive suggestions.
 - **CANDIDATE** knowledge is a hint only, shaded amber in the workbook, and
   never becomes a suggestion until a human promotes it.
+- **REJECTED** knowledge is a proposal a human has ruled out. Matching skips
+  it, and a later pass never revives it: `add_alias` upgrades only
+  `CANDIDATE → CONFIRMED`, so a rejection is as durable as a merge.
 
 Every alias and coordinate carries **evidence**: where it came from, which row,
 which description, and why. Evidence is append-only and survives promotion, so
 "why does the system think this?" is always answerable. Each catalog row shows
-an `evidence_count`.
+an `evidence_count`, and an **`Evidence` sheet** lists the records themselves —
+entity, candidate text, reason, run and source folder. The sheet is generated
+and read-only: `catalog.xlsx` is otherwise bidirectional, so import must ignore
+it explicitly. Rejecting a proposal without being able to read why it was
+offered is guesswork, which is why the two arrive together.
+
+#### Rejecting a proposal
+
+A human rejects an alias by moving it into a **`rejected_aliases`** column,
+beside `confirmed_aliases` and `candidate_aliases`. The column a value sits in
+*is* the decision, and moving it back out is how a rejection is undone —
+so rejected aliases must be exported, not hidden.
+
+Rejection is a **positive statement**, deliberately not an absence: clearing a
+cell means nothing. `catalog.xlsx` is three-way merged, and another machine's
+copy may legitimately lack a value it never saw; reading "gone" as "rejected"
+would turn a sync artefact into a decision. The same reasoning already governs
+merges, where listing another entity's canonical name as an alias is how a
+person states that two rows are the same thing.
+
+Two rules follow:
+
+- The importer needs a status setter that can move an alias in **both**
+  directions on explicit human instruction. `add_alias`'s "never degrade"
+  rule protects against *machine* passes, not against a person.
+- An alias listed in two columns at once is a mistake, not a state. Pick one
+  deterministic precedence and report the collision in the import outcome
+  rather than silently choosing.
+
+Rejection is scoped to one `(entity, alias)` pair. `мама` ruled out for one
+person says nothing about another — that ambiguity is exactly why kinship words
+become candidates in the first place.
+
+**Entities themselves are never rejected.** A person, place or tag exists
+because some final metadata says it does; the way to remove one is to fix the
+`review.xlsx` value or merge the entity into the right one. A `REJECTED` flag
+on the entity would fight the next `learn`, which would faithfully recreate it
+from the same typo. Rejection applies to *proposals* — what the machine
+inferred — never to what a human typed.
 
 ### Learning
 
@@ -952,6 +1246,73 @@ the policy — e.g. moving the YEAR midpoint off July 1 — must therefore force
 a rebuild of every affected file on its own, without a source or metadata
 change. No runtime timestamp, machine id or run id is ever part of it.
 
+### Publication identity, drift and republishing
+
+Publication is identified by the stored `mediaItemId`, never by filename:
+
+```text
+archive_photo_id · google_photos_media_id · published_at · published_build_fingerprint
+```
+
+The lifecycle stops at `PUBLISHED`. Every later inconsistency belongs to a
+separate **sync status** beside it, not to a longer chain of workflow statuses:
+a published photo whose metadata has since changed is still published.
+
+Drift is tracked by a **deterministic per-photo fingerprint** of the metadata
+that reaches Photos. There is no archive-wide revision number: a manual
+resolution means "I handled the state whose fingerprint was X", and it is
+invalidated precisely when the fingerprint changes. This also removes any
+question about scoped runs — there is no global counter to advance, so
+"not checked in this run" can never be mistaken for "in sync".
+
+What happens after publication:
+
+| Change | Response |
+| --- | --- |
+| Description-carried metadata changed (prose, date, place, coordinates, people, tags) | recompose the description, `PATCH`, verify by reading it back — fully automatic |
+| Baked metadata matters (Photos' own date, GPS) | republish, since `creationTime` and location come from the file and cannot be patched |
+| Built image bytes changed | republish — no API replaces the bytes of an existing item |
+| Stored `mediaItemId` no longer resolves | the photo becomes eligible for a fresh publication |
+
+Most drift is absorbed by the description, which is why that field is worth
+composing carefully: a corrected date or a new person reaches Photos without
+re-uploading anything. Republishing is reserved for what the description cannot
+express — the timeline date, the location Photos itself holds, and the image.
+
+#### Republishing is an explicit intent
+
+Nothing can be deleted through the API, so replacing a published photo always
+runs through the person: the archive shows a link, they delete the item in the
+Photos UI, and only then can a fresh copy be uploaded.
+
+The tempting shortcut — treat a vanished `mediaItemId` as permission to
+republish — is wrong, because **a disappearance is ambiguous**. It means either
+"deleted so it can be re-uploaded" or "deleted because I don't want this
+photograph in Google Photos". Guessing the first would silently resurrect a
+photo someone deliberately removed, which is the worst kind of surprise an
+archive can spring. So intent is recorded:
+
+| Stored item | Republish requested | Behaviour |
+| --- | --- | --- |
+| exists | yes | task: delete it in the UI. **Never** upload a second copy while the first lives |
+| gone | yes | publish afresh, store the new id |
+| gone | no | treated as **withdrawn** by choice — recorded, never re-uploaded |
+| exists | no | nothing to do |
+
+The request itself is a human statement and belongs in `review.xlsx`, entered
+the way a `Map Link` is: the person writes the instruction, the pipeline acts
+on it and reports the outcome in `Review Reason`, and **never edits the cell
+back** — a machine rewriting a human-owned column is exactly what the three-way
+merge should not have to arbitrate.
+
+A standing instruction must not fire twice, so satisfaction is decided by
+comparing state rather than by clearing anything: portable state records which
+`mediaItemId` the request was made against, and the request is fulfilled once
+the stored id differs from it. The same rule that makes a pasted `Map Link`
+idempotent.
+
+Folder- and album-level republishing is the same mechanism applied to a list.
+
 ### Google Photos is a consumer, not the source of truth
 
 Even if Google Photos later lets someone edit a displayed date, that UI edit
@@ -962,6 +1323,122 @@ ingestion test — using files from the actual production ExifTool writer, not
 an ad-hoc script — remains an acceptance test once the build step exists, for
 all four precisions, checking both the Info-panel date and timeline
 placement.
+
+### What Google Photos actually allows
+
+Verified against the current API. After the 2025 scope changes only the
+`appcreateddata` family survives, which suits this archive exactly: the app
+reads and edits the items it uploaded itself.
+
+| Operation | Available? |
+| --- | --- |
+| Read back an item we created | yes — `photoslibrary.readonly.appcreateddata` |
+| Update `description` | yes — `PATCH ?updateMask=description`, 1000 characters |
+| Album title / cover, membership | yes, for items the app added |
+| Update date, GPS, anything else | **no** — item metadata is derived from the file at upload |
+| Delete a media item | **no method exists** |
+
+Readable back: `creationTime`, `filename`, `description`, dimensions, camera
+fields, album membership, and the item's existence. **Location is never
+exposed** — it is stripped even from downloads. Practical limits: 10,000 API
+requests per project per day, 20,000 items per album, `batchCreate` omits
+`mediaMetadata` (re-fetch to verify), and `baseUrl` expires after 60 minutes,
+so only ids are stored.
+
+Two consequences shape everything downstream. Metadata is **baked into the file
+at upload**, so any metadata change worth publishing means a new upload — the
+built revision is the unit of publication. And since nothing can be deleted
+through the API, republishing always waits on a manual deletion in the UI.
+
+#### Face groups are out of reach, by policy
+
+Google Photos' People & pets grouping is client-side only. There is no person
+or cluster resource in the API, and the developer policy states plainly: *do
+not use Google Photos APIs to produce face clusters*. Groups are visible only
+to the user and vanish if face grouping is switched off.
+
+So archive `People` and Google's face groups can never be reconciled
+programmatically — any comparison is done by eye in the UI. This is a policy
+boundary, not a missing feature waiting to be worked around. (The archive's own
+People come from human review of the description documents, not from any face
+analysis, which is what keeps it on the right side of that line.)
+
+#### Albums
+
+v1 creates one album per source folder. **People-derived albums are deferred**,
+not rejected: their real purpose would be to sit beside a Google face group so
+a person can compare the two by eye, and that is worth doing only once there is
+something to compare.
+
+Deferring costs nothing, which is why it is the default. `albums.batchAddMediaItems`
+works on items the app created, so albums can be assembled later from photos
+already published — up to 50 items per request, 20,000 per album, and a request
+fails as a whole if any item is invalid. `mediaItems.batchCreate` can also place
+an item in an app-created album during upload, avoiding a second round trip.
+
+The same comparison is available without albums at all: the archive knows which
+photos list a given person and can present them with links straight to their
+Photos items.
+
+### The published description
+
+`description` is the only field that can be written *and* read back, so it
+carries everything else. That makes it two things at once: the archive's
+visible caption in Google Photos, and the only channel through which archive
+metadata reaches the Photos UI at all — People, Place and Tags are otherwise
+invisible there, since Photos' own face grouping is unrelated to XMP People.
+
+Photos does index captions, and since June 2025 a quoted query matches them
+exactly, so `"Валаам"` or `"Архив: Ф-ТоняМам-83-93-школа"` finds the photo or
+the whole folder. Treat that as a welcome side effect rather than a guarantee:
+indexing is not immediate, users report it working inconsistently, and album
+titles and descriptions are not searchable at all — only per-item captions.
+The design does not depend on search; it depends on the description being
+readable back, which is certain.
+
+It is composed deterministically from final metadata, in fixed order:
+
+```text
+Тоня и Аня у школы №5.
+
+лето 1990 · Валаам · 61.390000, 30.940000
+Люди: Тоня; Аня
+Теги: школа
+Архив: Ф-ТоняМам-83-93-школа/20200513_142008.jpg
+```
+
+- **Prose** — the final `Description`, first, because it is what a person
+  reads.
+- **Date** — the archival date *as written*, including precisions EXIF cannot
+  hold. For `SEASON` and `UNKNOWN` the build deliberately writes no
+  `DateTimeOriginal`, so this line is the only place `лето 1990` survives.
+- **Place and coordinates** — coordinates in a fixed decimal format, always
+  when known. GPS is unreadable through the API and stripped from downloads, so
+  without this line the location is simply lost to Photos.
+- **People, Tags, Event** — omitted entirely when empty; no empty labels.
+- **Archive reference** — source folder and filename, so any item can be traced
+  back to its row.
+
+Rules that make it verifiable:
+
+- **Deterministic**: the same final metadata always produces the same string,
+  byte for byte. Verification is plain equality between what we composed and
+  what the API returns — no parsing, no fuzzy comparison.
+- **Budget**: 1000 characters, counted as characters, with Cyrillic costing the
+  same as Latin. The tail is short and high-value, so it is reserved: only the
+  prose is truncated, at a word boundary with an ellipsis. Metadata is never
+  lost to a long caption. Verification then compares against the *truncated*
+  string that was actually sent.
+- **Versioned**: the composition policy carries a version, like
+  `DATE_COMPATIBILITY_POLICY_VERSION`. Changing the format must flag every
+  published photo as needing an update rather than reading as user drift.
+- **Machine-owned in Photos**: the archive composes it, so hand-editing a
+  description in the Photos UI will be overwritten on the next sync. Photos is
+  a consumer, not a place where archive metadata is authored.
+
+This is the one field with a complete loop — compose, write, read back, verify.
+Everything else is either fixed at upload time or, like location, permanently
+unverifiable through the API.
 
 ## Local Cache
 
@@ -996,16 +1473,46 @@ Do not use filenames alone as immutable identity.
 ## CLI
 
 ```bash
-python app.py scan "<yandex-public-url>" --dry-run       # inspect, writes nothing
-python app.py scan "<yandex-public-url>" --local-review   # generate review.xlsx
+python app.py run                                        # the local loop, every source
+python app.py scan "<yandex-public-url>"                  # source -> workbooks + Drive
+python app.py scan "<yandex-public-url>" --local-review   # source -> workbooks only
+python app.py scan "<yandex-public-url>" --dry-run        # inspect, writes nothing
+python app.py sync                                        # three-way Drive sync
+python app.py resolve-conflicts                           # settle a merge workbook
+python app.py bootstrap                                   # rebuild a clean machine
 python app.py learn                                       # learn from review-output
-python app.py learn --dry-run                             # propose without writing
+python app.py dashboard                                   # regenerate review-all.html
 python app.py build                                       # not implemented
 python app.py publish                                     # not implemented
 ```
 
 `learn` reads `./review-output` by default; `--source` points it elsewhere.
 Every run writes a full DEBUG transcript to `./logs/run-<id>.log`.
+
+### What each command is for
+
+`run` is the ordinary path: the whole local loop — scan every configured
+source, learn, rebuild the dashboard, publish a portable snapshot.
+
+`scan` is the full path for **one** source: read Yandex, write the workbooks,
+and mirror the folder to Google Drive. Until the Drive transport is wired it
+must fail with a plain statement that the transport is missing, not with
+`NotImplementedError` from inside the scanner.
+
+`scan --local-review` is the same scan without the destination: Yandex is read,
+workbooks are written, no Google service is contacted. It stays — it is how a
+single source is reviewed without touching Drive, and it is the only scanning
+form that works today.
+
+`sync` is separate on purpose. Three-way workbook synchronisation, semantic
+merge, baselines and conflict workbooks are not "scanning a source"; keeping
+them apart means a Drive outage cannot break reading Yandex, and it puts `sync`
+where it belongs — beside `resolve-conflicts` and `bootstrap`.
+
+**Any command that writes workbooks publishes a portable snapshot** — `scan`
+and `scan --local-review` included, `--dry-run` excluded because it writes
+nothing. A scan that updated the workbooks but left `_archive_state/` behind
+would make a clean-machine `bootstrap` silently lose that work.
 
 ## Proposed Python Stack
 

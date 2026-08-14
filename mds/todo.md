@@ -71,6 +71,22 @@ Enough Excel behaviour exists that human judgement is required, not just tests.
 - [ ] Per-photo Yandex links instead of folder-level, if the API exposes them
 - [ ] Populate Drive / Photos links once those phases exist
 
+### Source-description coverage — design frozen, not implemented
+
+Semantics live in `family-photo-archive-project.md` → "Source-description
+coverage". Ready to build; the open items below are deliberate defaults to
+choose while implementing, not design questions.
+
+- [ ] Portable-state read path in `dashboard/aggregate.py` — `collect()` reads
+      only workbooks today, and both the folder record and `source_entry_exists`
+      live in `_archive_state/`. No machine columns in `review.xlsx`, so the
+      three-way merge stays untouched
+- [ ] Per-folder summary + the four-value breakdown; no archive-wide count
+- [ ] Where the breakdown lives: expanded folder details, a filter, or both
+- [ ] Filter granularity — four values, two buckets, or both
+- [ ] Wording/badges for `ABSENT` / `AMBIGUOUS` / `UNKNOWN`, and how visibly
+      actionable `AMBIGUOUS` looks
+
 ## 4. People / Tags iterative propagation
 
 Places are verified on real data; People and Tags are not. No NLP extraction —
@@ -83,12 +99,28 @@ manual review plus learning is the deliberate bootstrap.
 
 ## 5. Catalog candidate / evidence UX
 
-- [ ] Evidence view — `catalog.xlsx` exposes `evidence_count` but no reasons;
-      likely an `Evidence` sheet
-- [ ] Candidate **reject/dismiss**: promotion works, but there's no way to say
-      "this is wrong, stop proposing it"
+Design **decided** — see the architecture doc's "Confirmed vs candidate" →
+"Rejecting a proposal". Rejection ships together with the evidence view.
+
+- [ ] `rejected_aliases` column in `catalog.xlsx`: export rejected aliases, and
+      import the column as a positive decision (an emptied cell means nothing)
+- [ ] Store: a status setter that moves an alias in **both** directions on
+      explicit human instruction — `add_alias`'s "never degrade" rule guards
+      machine passes, not people
+- [ ] Precedence rule when one alias appears in two columns, plus a collision
+      report in the import outcome
+- [ ] `Evidence` sheet — generated, read-only, ignored by import; entity,
+      candidate text, reason, run, source folder
+- [ ] Verify a rejected alias stays rejected across `learn` → `scan` → export
+      on real data (`add_alias` already refuses to revive it)
 - [ ] Bulk candidate review flow
+- [ ] Coordinate-candidate rejection — **deferred** until a real coordinate
+      conflict has been seen; same mechanism is expected to apply
 - [ ] Validate the coordinate-conflict UX against a real conflict
+
+Entities are never rejected: an entity exists because final metadata says so.
+Removing one means fixing `review.xlsx` or merging — otherwise the next `learn`
+recreates it from the same typo.
 
 ## 6. Source-change lifecycle
 
@@ -97,12 +129,20 @@ Unit-tested; not yet exercised end to end against real sources.
 - [ ] Image changed → REVIEW, preview refreshed, finals kept
 - [ ] Description changed (and changed after APPROVED) → distinct reasons
 - [ ] Photo removed → `SOURCE_MISSING`, row and metadata kept
+- [ ] Description document deleted → the row keeps yesterday's source text and
+      is marked **stale** (derived from `source_entry_exists` + non-empty source
+      columns, nothing new persisted); diagnostic in `Review Reason`, coverage
+      still `NO_ENTRY`
+- [ ] Photo returns after `SOURCE_MISSING` → `REVIEW` with a new `Photo
+      returned` reason, not `Source photo changed`; the previous status is not
+      restored
 - [ ] `DESCRIBED_ABSENT` photo appears → same row reused
 - [ ] New photos added to an existing folder
 - [ ] Nested folders (both real sources are flat — untested live)
 - [ ] Source folder renamed
 - [ ] Same filename in different folders (identity is scoped; confirm live)
 - [ ] Multiple source roots in one run
+- [ ] Photo moved between folders — covered by the reconciliation pass (§13)
 
 ## 7. Yandex source hardening
 
@@ -135,8 +175,16 @@ No workbooks in pure intermediate directories.
 - [ ] Record Drive file ids into portable state during upload
 - [ ] Reserved `state.py` methods: `record_description`, `mark_built`,
       `mark_published`
-- [ ] Handle renamed/moved source folders
-- [ ] Complete plain `scan` (no `--dry-run` / `--local-review`) as a real end-to-end command
+- [ ] Per-folder description record + `source_entry_exists` in portable state,
+      so coverage is reportable without a Yandex rescan (see §11)
+- [ ] Handle renamed/moved source folders — recognised as one pattern by the
+      reconciliation pass (§13), not as many unrelated photo moves
+- [ ] Complete plain `scan` as a real end-to-end command: Yandex → workbooks →
+      Drive mirror, for one source (`Scanner.scan` / `mirror_folder` are stubs)
+- [ ] Split the Drive side into a `sync` command beside `resolve-conflicts` and
+      `bootstrap` — three-way sync is not "scanning a source"
+- [ ] Every scanning command publishes a portable snapshot, `scan` included
+      (today only `run` does, so a single scan leaves `_archive_state/` behind)
 
 ## 9. Metadata `build`
 
@@ -187,38 +235,139 @@ implemented.
 
 ## 10. Google Photos publishing
 
-**Before starting this section**, resolve the open sync/republish design
-questions in
-[`to-discuss-google-photos-sync.md`](to-discuss-google-photos-sync.md) —
-lifecycle vs. sync status, manual-approval invalidation, republish intent,
-album semantics. Not yet implemented; do not implement without revisiting it.
+Design **decided** — see the architecture doc: "What Google Photos actually
+allows", "The published description", "Publication identity, drift and
+republishing". Not implemented; nothing here is blocked on further discussion.
 
-- [ ] **Re-check current API capabilities first** — don't rely on old assumptions
+- [x] API capabilities re-checked (Aug 2026): only `appcreateddata` scopes;
+      `description` is the only writable field (1000 chars); no delete method;
+      location never readable — see the architecture doc
 - [ ] Auth; upload only built copies; albums from final `Albums`
 - [ ] Persist media ids, never upload twice; error handling and retries
+- [ ] Compose the published description deterministically (prose · date ·
+      place · coordinates · people · tags · archive ref), reserve the metadata
+      tail inside the 1000-character budget, truncate only the prose
+- [ ] Composition policy version, so a format change flags every published
+      photo instead of looking like user drift
+- [ ] Verify by reading the description back and comparing exactly with the
+      string that was sent (the truncated one, if truncation happened)
+- [ ] v1 automates description + album membership; everything else is a manual
+      task with a link to the item
+- [ ] Albums: one per source folder in v1. People-derived albums deferred —
+      reversible later via `albums.batchAddMediaItems` on already-published
+      items (50 per request, 20k per album, no partial success)
+- [ ] A per-person view in the dashboard, with links into Photos, as the
+      lightweight alternative to People albums
+- [ ] Sync status beside `PUBLISHED`, driven by a deterministic per-photo
+      fingerprint; no archive-wide revision counter
+- [ ] Republish as an explicit intent, entered in `review.xlsx` like a
+      `Map Link`: the pipeline acts and reports in `Review Reason`, never edits
+      the cell back. Fulfilment is decided by comparing the stored
+      `mediaItemId` with the one the request was made against — no clearing
+- [ ] A vanished item **without** a request means withdrawn by choice: record
+      it, never re-upload. Never duplicate while the original still exists
+- [ ] Quotas and batching: 10k requests/day, 50 items per album request, 20k
+      per album, no partial success; `batchCreate` can place an item in an
+      album during upload
 
 Face recognition and person naming are Photos **UI** features; EXIF/XMP People
-metadata does not train Google's face identities.
+metadata does not train Google's face identities — and the API exposes no
+person or cluster resource at all, by policy.
 
 ## 11. Workflow / status
 
-- [ ] When a row becomes `APPROVED` (never set automatically today)
+`APPROVED` is **decided** — a human act, no validation, no auto-approval; see
+the architecture doc's "`APPROVED` is a human act". Nothing to build there
+beyond what already exists; the follow-ons are below.
+
+- [x] When a row becomes `APPROVED` — only a person types it; the pipeline
+      never sets or infers it, and never checks completeness
 - [ ] `build` → `BUILT`; `publish` → `PUBLISHED`
+- [ ] `build` skips rows with no photo behind them (`DESCRIBED_ABSENT`,
+      `SOURCE_MISSING`) whatever their status, and reports what it wrote rather
+      than refusing rows with empty finals
+- [ ] Rebuild detection after `BUILT`: a human edit to final metadata must mark
+      the row as needing a rebuild — a dimension beside `Status`, not a new
+      status. Needs a finals hash; `RowState` keeps none today (the unused
+      `PhotoReviewRecord.metadata_hash` was meant for this)
 - [ ] Source changing after `BUILT`/`PUBLISHED`; rebuild/republish policy —
-      see `to-discuss-google-photos-sync.md`
-- [ ] `SKIP` and `SOURCE_MISSING` follow-up
+      see the architecture doc's "Publication identity, drift and republishing"
+- [x] **`SKIP` is terminal** — `_flag()` in `review/builder.py` reports the
+      change in `Review Reason` without overwriting a skipped row's `Status`;
+      covered for description, image, disappearance and return
 - [ ] Keep diagnostics in `Review Reason`, not `Status`
+
+Source-description coverage is **not** a workflow status and never gates
+anything — see the architecture doc. Implementation steps:
+
+- [ ] Persist the folder record (status + selected document) in `SourceState`;
+      decide keying and what happens when a folder disappears
+- [ ] Persist `source_entry_exists` per row — `RowState` → portable
+      `ItemState` via `_apply_row_state`. Do **not** reuse the latent
+      `description_hash is not None` signal: it is an accident of change
+      detection
+- [ ] Derive `PhotoDescriptionCoverage` from those observations plus the
+      workbook source columns; never store the classification
+- [ ] Classify source-note patterns explicitly (`SOURCE_STATE` / `DESCRIPTIVE`);
+      make `SOURCE_NOTE_PATTERNS` a pattern → class mapping so an unclassified
+      pattern cannot be added
+- [ ] Make "no coverage outside `FOUND`" structural (`| None` or a result type
+      carrying folder status), not a convention
+- [ ] Delete or repurpose the unused `PhotoReviewRecord` (`models.py:110`) and
+      its never-populated `description_document` field
+- [ ] Tests: the invariant above; "`UNKNOWN` never counts as needing
+      description"; "no photo-level value outside `FOUND`"; the stale
+      source-column case (§6)
+- [ ] Pin the invariant with tests: every physical source photo always gets a
+      normal editable `review.xlsx` row, whatever its coverage value and
+      whatever the folder's description-document state (holds today via
+      `Reconciliation.undescribed_photos`; untested as a rule)
 
 ## 12. CLI, diagnostics, docs
 
 - [x] `dashboard` command generates `review-all.html`
-- [ ] Decide whether `--local-review` becomes the default for `scan`
+- [x] CLI shape decided — see the architecture doc's "What each command is for".
+      `--local-review` **stays**: it is the local path for a single source
+- [x] `scan` reports the missing Drive transport in plain words and names the
+      commands that do work, instead of surfacing `Scanner.scan is not
+      implemented yet` (`tests/test_cli_scan.py`)
 - [ ] Backup before workbook rewrite/import (currently manual)
 - [ ] Retention/cleanup for `logs/` and `review-output-backup-*/` (3 already accumulated)
 - [ ] Recovery from an interrupted run
 - [ ] Document generated directories, backup/log locations, and a one-page "how I run this"
 
-## 13. Tests
+## 13. Reconciliation pass (moved photos, duplicates, orphan descriptions)
+
+Design **decided** — see the architecture doc's "When a photo moves between
+folders". A separate archive-wide command; reads durable state, no provider
+access; proposes, never mutates on its own.
+
+- [x] Verified on the real source: folder listings expose `resource_id`, `md5`
+      and `sha256` per item; the provider's `sha256` equals the locally computed
+      one; identical content in two files gets two different `resource_id`s
+- [x] Verified by moving a real file: `resource_id` survives a move (`created`
+      unchanged, `modified` bumped). Copies get a new id; a re-upload changes
+      both id and hash, leaving only the filename
+- [ ] `_parse_item` keeps only the first of `md5`/`sha256`, discarding the
+      digest that is comparable with `photo_hash` — record `sha256`, or both
+- [ ] Matching: `resource_id` (same file) → `sha256` (same image) → filename
+      (survives a re-upload; weak, always proposed, never auto-applied)
+- [ ] Re-upload into a different folder is the hardest case — both strong
+      signals change at once; make sure the pass says *why* it proposed a link
+- [ ] Three findings kept distinct: moved photo, true duplicate (**report
+      only** in v1), orphan description (cross-folder link, manual only)
+- [ ] Proposals shown in `review-all.html` with both previews; decisions
+      entered in a proposals workbook, like `resolve-conflicts`
+- [ ] Applying a move carries finals, `Status` and portable `ItemState`
+      (`drive_file_id`, `build_fingerprint`, `google_photos_media_id`) — the
+      row leaves one `review.xlsx` and enters another, so work out what that
+      does to both workbooks' sync baselines
+- [ ] Durable rejection of a proposal, so the pass never re-offers it
+- [ ] Evidence for every applied link: which signal matched, what joined what
+- [ ] Folder-level moves proposed as one action
+- [ ] Command name, and it stays out of `run` — on demand only
+
+## 14. Tests
 
 - [x] Unit, mocked-HTTP, round-trip and idempotency suites
 - [ ] Source-change integration tests against the real folders
