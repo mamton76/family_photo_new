@@ -19,6 +19,7 @@ from pathlib import Path
 
 from photoarchive.coverage import FolderDescriptionStatus, PhotoDescriptionCoverage
 from photoarchive.dashboard.aggregate import Aggregate, FolderGroup, needs_review
+from photoarchive.dashboard.dictionary import DictionarySummary, read_summary
 from photoarchive.dashboard.links import PhotoDestinations, links_for
 from photoarchive.dashboard.preview import PreviewProvider
 from photoarchive.geo import parse_latlon
@@ -72,6 +73,9 @@ color:var(--absent);font-size:12px;text-align:center;padding:8px}
 background:#eef1f5;color:var(--muted)}
 .status.DESCRIBED_ABSENT{background:#f3f4f6;color:var(--absent)}
 .group>summary .coverage{margin-left:auto;color:#6b7280;font-size:12px;font-weight:400}
+.dict{display:flex;gap:10px;flex-wrap:wrap;align-items:center;background:var(--card);
+border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:13px}
+.warn-chip{background:#fef3c7;color:var(--warn);border-radius:999px;padding:3px 10px;font-size:12px}
 .status.REVIEW,.status.SOURCE_CHANGED{background:#fef3c7;color:var(--warn)}
 .status.APPROVED,.status.BUILT,.status.PUBLISHED{background:#dcfce7;color:#15803d}
 .reason{color:var(--warn);font-size:12px;margin-top:4px}
@@ -167,6 +171,7 @@ def render_dashboard(
     aggregate: Aggregate,
     previews: PreviewProvider | None = None,
     generated_at: datetime | None = None,
+    dictionary: DictionarySummary | None = None,
 ) -> str:
     """Render the whole dashboard as one HTML document."""
     stamp = generated_at or datetime.now(tz=timezone.utc)
@@ -182,6 +187,7 @@ def render_dashboard(
         f"{aggregate.absent_photos} described but absent · "
         "read-only view; edit metadata in the per-folder review.xlsx</div></header>",
         "<main>",
+        _render_dictionary(dictionary),
         _render_summary(aggregate),
         _render_controls(aggregate),
     ]
@@ -196,6 +202,41 @@ def render_dashboard(
         ]
     )
     return "\n".join(parts)
+
+
+def _render_dictionary(summary: DictionarySummary | None) -> str:
+    """A line about the dictionary, and a warning when it grew by itself.
+
+    Learning creates a canonical entity whenever a typed value matches nothing
+    known — which is also what a typo does. Saying so here, beside the photos,
+    is the difference between catching it now and finding it once it has
+    propagated into a dozen rows.
+    """
+    if summary is None or summary.missing:
+        return ""
+
+    counts = (
+        f"{summary.people} people · {summary.places} places · {summary.tags} tags"
+    )
+    if summary.rejected:
+        counts += f" · {summary.rejected} rejected"
+
+    parts = [f'<div class="dict"><span>Dictionary: {_escape(counts)}</span>']
+    if summary.candidates:
+        parts.append(
+            f'<span class="warn-chip">{summary.candidates} candidate aliases '
+            "awaiting a decision</span>"
+        )
+    if summary.created_recently:
+        names = ", ".join(summary.created_recently[:6])
+        if len(summary.created_recently) > 6:
+            names += f" and {len(summary.created_recently) - 6} more"
+        parts.append(
+            '<span class="warn-chip">new in the last run: '
+            f"{_escape(names)} — check for typos</span>"
+        )
+    parts.append("</div>")
+    return "".join(parts)
 
 
 def _render_summary(aggregate: Aggregate) -> str:
@@ -453,11 +494,18 @@ def write_dashboard(
     output_path: Path | str,
     previews: PreviewProvider | None = None,
     generated_at: datetime | None = None,
+    catalog_dir: Path | str | None = None,
 ) -> Path:
-    """Render and save the dashboard. Touches nothing else on disk."""
+    """Render and save the dashboard. Touches nothing else on disk.
+
+    ``catalog_dir`` is where ``catalog.xlsx`` lives — normally beside the review
+    workbooks. Absent or unreadable, the dictionary panel is simply omitted.
+    """
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    dictionary = read_summary(catalog_dir) if catalog_dir is not None else None
     path.write_text(
-        render_dashboard(aggregate, previews, generated_at), encoding="utf-8"
+        render_dashboard(aggregate, previews, generated_at, dictionary),
+        encoding="utf-8",
     )
     return path

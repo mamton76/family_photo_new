@@ -1,4 +1,4 @@
-.venv/
+в .venv/
 venv/
 .idea/
 __pycache__/
@@ -18,3 +18,4 @@ token.json
 logs/
 review-output/
 review-output-backup-*/
+/catalog.xlsx.backup-223707

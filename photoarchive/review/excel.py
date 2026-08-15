@@ -26,7 +26,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
 
 from photoarchive.geo import parse_latlon
@@ -48,6 +50,9 @@ VISIBLE_COLUMNS: tuple[str, ...] = (
     "Source Description",
     "Section Context",
     "Source Notes",
+    # Beside the text it is written from: the archival caption is edited
+    # against the source, not against the metadata columns.
+    "Description",
     "Suggested Date",
     "Date",
     "Suggested Place",
@@ -61,7 +66,6 @@ VISIBLE_COLUMNS: tuple[str, ...] = (
     "Tags",
     "Event",
     "Albums",
-    "Description",
     "Status",
     "Review Reason",
     "Notes",
@@ -120,6 +124,12 @@ _COLUMN_WIDTHS: dict[str, int] = {
 }
 _DEFAULT_WIDTH = 18
 
+_COMMENT_AUTHOR = "family-photo-archive"
+
+#: Cells that carry the source text as a note. The fields a reviewer actually
+#: fills, so the description is under the cursor rather than columns away.
+_NOTED_COLUMNS = frozenset({"Date", "Place", "People", "Tags", "Description"})
+
 _WRAPPED_COLUMNS = frozenset(
     {"Source Description", "Section Context", "Description", "Review Reason", "Notes"}
 )
@@ -131,6 +141,11 @@ _PX_TO_POINTS = 0.75
 _HEADER_FILL = PatternFill("solid", fgColor="DDE5F0")
 _SUGGESTED_FILL = PatternFill("solid", fgColor="F2F2F2")
 _HYPERLINK_FONT = Font(color="0563C1", underline="single")
+
+
+#: Bumped whenever the sheet's presentation changes — comments, validation,
+#: column set or widths — so every workbook is rewritten exactly once.
+LAYOUT_VERSION = 3
 
 
 def column_index(name: str) -> int:
@@ -146,8 +161,14 @@ def rows_signature(rows: "list[ReviewRow]") -> str:
     like an edit: a needless Drive upload and a needless portable-state
     generation. Comparing content instead of bytes is what lets an unchanged
     scan leave the file completely alone.
+
+    :data:`LAYOUT_VERSION` is part of the hash because the sheet holds more
+    than its values — comments, dropdowns, widths. Without it a layout
+    improvement would only reach workbooks whose rows happened to change, and
+    an untouched folder would keep the old sheet indefinitely.
     """
     digest = hashlib.sha256()
+    digest.update(f"layout={LAYOUT_VERSION}\x1e".encode("utf-8"))
     for row in rows:
         for column in VISIBLE_COLUMNS:
             if column == "Preview":
@@ -330,6 +351,7 @@ class ReviewWorkbookService:
             cell.alignment = Alignment(vertical="center", wrap_text=True)
 
     def _write_row(self, worksheet, excel_row: int, row: ReviewRow) -> None:
+        note = _source_note(row)
         for column in VISIBLE_COLUMNS:
             index = column_index(column)
             if column == "Preview":
@@ -350,6 +372,13 @@ class ReviewWorkbookService:
             if column in SUGGESTED_COLUMNS:
                 cell.fill = _SUGGESTED_FILL
 
+            # What the source actually says, beside the field being filled in.
+            # The description column is far to the left and scrolls out of
+            # sight exactly when it is needed, and re-reading it is most of the
+            # work of filling a row.
+            if note and column in _NOTED_COLUMNS:
+                cell.comment = Comment(note, _COMMENT_AUTHOR, height=140, width=320)
+
             # Both coordinate cells link to the point; the text stays canonical.
             if column in ("Suggested LatLon", "LatLon") and value:
                 point = parse_latlon(value)
@@ -367,6 +396,49 @@ class ReviewWorkbookService:
         worksheet.freeze_panes = "C2"
         last_column = get_column_letter(len(VISIBLE_COLUMNS))
         worksheet.auto_filter.ref = f"A1:{last_column}{max(row_count + 1, 1)}"
+
+        if row_count:
+            self._add_status_validation(worksheet, row_count)
+
+    def _add_status_validation(self, worksheet, row_count: int) -> None:
+        """Offer the statuses as a list, so one cannot be mistyped.
+
+        An unrecognised value is read back as ``NEW`` (:func:`_parse_status`),
+        which would silently discard a decision — a typo in ``APPROVED`` must
+        not look like a row nobody has touched yet.
+
+        Excel does not apply validation to pasted values, so this makes typing
+        safe rather than making the column tamper-proof.
+        """
+        validation = DataValidation(
+            type="list",
+            formula1=f'"{",".join(status.value for status in WorkflowStatus)}"',
+            allow_blank=True,
+            showDropDown=False,
+        )
+        validation.error = "Pick one of the archive's statuses."
+        validation.errorTitle = "Unrecognised status"
+        worksheet.add_data_validation(validation)
+        letter = get_column_letter(column_index("Status"))
+        validation.add(f"{letter}2:{letter}{row_count + 1}")
+
+
+def _source_note(row: ReviewRow) -> str:
+    """The source's own words about this photo, for a cell comment.
+
+    Verbatim, not summarised: the point is to read what the document says while
+    filling a field in. Section context is labelled rather than run together
+    with the description, because it is inherited from a divider and describes
+    the surrounding run of photos, not this one.
+    """
+    parts: list[str] = []
+    if (row.source_description or "").strip():
+        parts.append(row.source_description.strip())
+    if (row.section_context or "").strip():
+        parts.append(f"Раздел: {row.section_context.strip()}")
+    if (row.source_notes or "").strip():
+        parts.append(f"Пометки: {row.source_notes.strip()}")
+    return "\n\n".join(parts)
 
 
 def build_preview(

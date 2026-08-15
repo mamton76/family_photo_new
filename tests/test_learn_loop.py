@@ -200,7 +200,9 @@ def test_blank_final_fields_are_filled_from_suggestions() -> None:
     assert row.latlon == MOSCOW.format()
     assert row.people == "Тоня Мамаева"
     assert row.tags == "дача"
-    assert len(outcome.autofilled) == 5
+    # The five suggested fields, plus the caption seeded from the source text.
+    assert len(outcome.autofilled) == 6
+    assert row.description == "описание"
 
 
 def test_non_empty_final_values_are_never_overwritten() -> None:
@@ -217,7 +219,8 @@ def test_non_empty_final_values_are_never_overwritten() -> None:
     assert row.latlon == OTHER.format()
     assert row.people == "Кто-то Другой"
     assert row.tags == "свой-тег"
-    assert outcome.autofilled == []
+    # Only the untouched caption is seeded; every typed value stands.
+    assert outcome.autofilled == ["020.description"]
     assert outcome.preserved == ["020"]
 
 
@@ -240,7 +243,8 @@ def test_blank_finals_stay_blank_without_suggestions() -> None:
     )
 
     assert outcome.rows[0].place == ""
-    assert outcome.autofilled == []
+    # No suggestions, so nothing but the caption is written.
+    assert outcome.autofilled == ["020.description"]
 
 
 # -- Full propagation loop ------------------------------------------------
@@ -633,3 +637,25 @@ def test_merging_an_entity_into_itself_does_nothing(tmp_path: Path) -> None:
 
     assert store.merge_entities(EntityType.PLACE, place, place) is None
     assert len(store.load().places) == 1
+
+
+def test_the_caption_starts_from_the_source_text_but_stays_the_reviewers() -> None:
+    """`Description` is seeded, then owned: a rewrite is never undone."""
+    outcome, states = build_rows(
+        _reconciliation(), {"020": Suggestion()}, existing=_existing(), states={}
+    )
+    row = outcome.rows[0]
+    assert row.description == "описание"
+
+    row.description = "Тоня у дома на Днепропетровской, лето"
+    rescan, _ = build_rows(
+        _reconciliation(),
+        {"020": Suggestion()},
+        existing={"020": row},
+        states=states,
+    )
+
+    assert rescan.rows[0].description == "Тоня у дома на Днепропетровской, лето"
+    assert "020.description" not in rescan.autofilled
+    # The machine's own copy of the source text is refreshed as always.
+    assert rescan.rows[0].source_description == "описание"

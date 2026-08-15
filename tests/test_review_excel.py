@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 from photoarchive.models import WorkflowStatus
 from photoarchive.review.excel import (
@@ -17,6 +18,7 @@ from photoarchive.review.excel import (
     build_preview,
     column_index,
     identity_key,
+    rows_signature,
 )
 from photoarchive.review.model import ReviewRow, join_values, split_values
 
@@ -26,6 +28,7 @@ EXPECTED_COLUMNS = (
     "Source Description",
     "Section Context",
     "Source Notes",
+    "Description",
     "Suggested Date",
     "Date",
     "Suggested Place",
@@ -39,7 +42,6 @@ EXPECTED_COLUMNS = (
     "Tags",
     "Event",
     "Albums",
-    "Description",
     "Status",
     "Review Reason",
     "Notes",
@@ -183,3 +185,79 @@ def test_build_preview_returns_none_for_unreadable_images(tmp_path: Path) -> Non
     broken.write_bytes(b"not an image")
 
     assert build_preview(broken, tmp_path / "out.png") is None
+
+
+# -- Filling a row in: what the sheet offers the reviewer ------------------
+
+
+def test_status_column_offers_the_statuses_as_a_list(tmp_path: Path) -> None:
+    """An unrecognised status reads back as NEW, so typing must be guarded."""
+    path = tmp_path / "review.xlsx"
+    ReviewWorkbookService().write(path, [ReviewRow(reference="020", filename="020.jpg")])
+
+    workbook = load_workbook(path)
+    try:
+        sheet = workbook[SHEET_NAME]
+        validations = sheet.data_validations.dataValidation
+        assert len(validations) == 1
+        validation = validations[0]
+        assert "APPROVED" in validation.formula1
+        assert "SKIP" in validation.formula1
+        # It covers the Status column's data rows, not the header.
+        assert str(validation.sqref).startswith(
+            get_column_letter(column_index("Status")) + "2"
+        )
+    finally:
+        workbook.close()
+
+
+def test_source_text_is_attached_to_the_cells_a_reviewer_fills(tmp_path: Path) -> None:
+    row = ReviewRow(reference="020", filename="020.jpg")
+    row.source_description = "Тоня и Аня у школы"
+    row.section_context = "Далее 1990 год"
+    row.source_notes = "нет фото"
+
+    path = tmp_path / "review.xlsx"
+    ReviewWorkbookService().write(path, [row])
+
+    workbook = load_workbook(path)
+    try:
+        sheet = workbook[SHEET_NAME]
+        comment = sheet.cell(row=2, column=column_index("People")).comment
+        assert comment is not None
+        assert "Тоня и Аня у школы" in comment.text
+        assert "Далее 1990 год" in comment.text
+        assert "нет фото" in comment.text
+        # Not on every cell: the source columns already show this text.
+        assert sheet.cell(row=2, column=column_index("Source Description")).comment is None
+    finally:
+        workbook.close()
+
+
+def test_a_row_with_no_source_text_gets_no_comment(tmp_path: Path) -> None:
+    path = tmp_path / "review.xlsx"
+    ReviewWorkbookService().write(path, [ReviewRow(reference="021", filename="021.jpg")])
+
+    workbook = load_workbook(path)
+    try:
+        sheet = workbook[SHEET_NAME]
+        assert sheet.cell(row=2, column=column_index("People")).comment is None
+    finally:
+        workbook.close()
+
+
+def test_a_layout_change_rewrites_an_otherwise_unchanged_workbook() -> None:
+    """Otherwise a folder nobody edited would keep the old sheet forever."""
+    from photoarchive.review import excel as excel_module
+
+    rows = [ReviewRow(reference="020", filename="020.jpg")]
+    before = rows_signature(rows)
+
+    original = excel_module.LAYOUT_VERSION
+    try:
+        excel_module.LAYOUT_VERSION = original + 1
+        assert rows_signature(rows) != before
+    finally:
+        excel_module.LAYOUT_VERSION = original
+
+    assert rows_signature(rows) == before

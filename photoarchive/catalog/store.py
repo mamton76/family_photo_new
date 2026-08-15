@@ -195,10 +195,14 @@ class DictionaryStore:
         entity_id: str,
         alias: str,
         status: ConfidenceStatus = ConfidenceStatus.CANDIDATE,
-    ) -> None:
-        """Add or upgrade an alias.
+    ) -> bool:
+        """Add or upgrade an alias, reporting whether anything changed.
 
-        A confirmed alias never degrades back to a candidate on a later pass.
+        A confirmed alias never degrades back to a candidate on a later pass,
+        and a rejected one is never revived. Both cases return ``False``, so a
+        caller counts what the dictionary actually learned rather than what it
+        was offered — proposing the same refused spelling on every run is not
+        growth.
         """
         with self.connect() as connection:
             existing = connection.execute(
@@ -212,7 +216,7 @@ class DictionaryStore:
                     " VALUES (?, ?, ?, ?)",
                     (entity_type.value, entity_id, alias, status.value),
                 )
-                return
+                return True
 
             if (
                 existing["status"] == ConfidenceStatus.CANDIDATE.value
@@ -223,6 +227,9 @@ class DictionaryStore:
                     " WHERE entity_type = ? AND entity_id = ? AND alias = ?",
                     (status.value, entity_type.value, entity_id, alias),
                 )
+                return True
+
+            return False
 
     def set_alias_status(
         self,

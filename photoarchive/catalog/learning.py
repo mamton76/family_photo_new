@@ -217,9 +217,15 @@ def _learn_alias(
 ) -> None:
     """Decide whether the source text taught us a new spelling of ``canonical``.
 
-    A confirmed alias needs an unambiguous mapping: the approved value is
-    absent from the source text, and exactly one unclaimed phrase there could
-    plausibly have produced it. Otherwise it is a candidate.
+    Everything learned this way is a **candidate**. Being the only unclaimed
+    phrase in a sentence is weak evidence of anything: on real data it produced
+    confirmed nonsense — the tag ``День Рождения`` was taught to mean
+    ``Сережа Мамаев (6``, and the place ``Чертановская`` to mean ``У кого-то в
+    гостях`` — because the reviewer knew something the text never said.
+
+    A person typing a value the source does not contain has added knowledge,
+    not renamed a phrase. Only a human may promote such a guess, in
+    ``catalog.xlsx``.
     """
     source = (row.source_description or "").strip()
     if not source:
@@ -234,23 +240,22 @@ def _learn_alias(
     if not phrases:
         return
 
-    if len(phrases) == 1 and not _is_context_dependent(phrases[0]):
-        store.add_alias(entity_type, entity_id, phrases[0], ConfidenceStatus.CONFIRMED)
-        outcome.confirmed_aliases.append(f"{phrases[0]} -> {canonical}")
-        store.record_evidence(
-            _evidence(
-                entity_type, canonical, EvidenceReason.APPROVED_VS_SOURCE, row, context,
-                status=ConfidenceStatus.CONFIRMED, candidate_text=phrases[0],
-            )
-        )
-        return
-
+    # A lone phrase is still only a guess, so it is recorded as one — with the
+    # reason that produced it, which is what a person needs in order to judge.
+    lone = len(phrases) == 1 and not _is_context_dependent(phrases[0])
+    reason = (
+        EvidenceReason.APPROVED_VS_SOURCE if lone else EvidenceReason.FUZZY_CANDIDATE
+    )
     for phrase in phrases:
-        store.add_alias(entity_type, entity_id, phrase, ConfidenceStatus.CANDIDATE)
+        if not store.add_alias(
+            entity_type, entity_id, phrase, ConfidenceStatus.CANDIDATE
+        ):
+            # Already known, or ruled out by a person: not something learned.
+            continue
         outcome.candidate_aliases.append(f"{phrase} -> {canonical}")
         store.record_evidence(
             _evidence(
-                entity_type, canonical, EvidenceReason.FUZZY_CANDIDATE, row, context,
+                entity_type, canonical, reason, row, context,
                 status=ConfidenceStatus.CANDIDATE, candidate_text=phrase,
             )
         )

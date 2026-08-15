@@ -501,7 +501,7 @@ def command_dashboard(args: argparse.Namespace, config: AppConfig) -> int:
 
     aggregate = collect_review_rows(args.source, source_roots)
     previews = PreviewProvider(config.cache.directory)
-    path = write_dashboard(aggregate, output, previews)
+    path = write_dashboard(aggregate, output, previews, catalog_dir=args.source)
 
     size_mb = path.stat().st_size / (1024 * 1024)
     log_summary(

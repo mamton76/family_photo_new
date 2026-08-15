@@ -84,6 +84,11 @@ class ReviewRow:
         ("latlon", "suggested_latlon"),
         ("people", "suggested_people"),
         ("tags", "suggested_tags"),
+        # The archival caption starts as what the document said, so the common
+        # case is editing a sentence rather than retyping it. `Source
+        # Description` is the machine's copy and is refreshed every scan; this
+        # one is the reviewer's to cut down, rewrite or replace.
+        ("description", "source_description"),
     )
 
     def seed_final_from_suggestions(self) -> None:

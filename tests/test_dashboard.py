@@ -334,3 +334,55 @@ def test_write_dashboard_creates_the_file(tmp_path: Path) -> None:
 
     assert path.exists()
     assert path.read_text(encoding="utf-8").startswith("<!doctype html>")
+
+
+# -- The dictionary panel -------------------------------------------------
+
+
+def test_dashboard_warns_about_entities_the_last_run_invented(tmp_path: Path) -> None:
+    """A typo becomes a canonical entity, so its arrival must be visible."""
+    from openpyxl import Workbook
+
+    from photoarchive.dashboard.aggregate import Aggregate
+    from photoarchive.dashboard.dictionary import read_summary
+    from photoarchive.dashboard.html import render_dashboard
+
+    workbook = Workbook()
+    people = workbook.active
+    people.title = "People"
+    people.append(["person_id", "canonical_name", "confirmed_aliases",
+                   "candidate_aliases", "rejected_aliases", "evidence_count", "notes"])
+    people.append(["p-1", "Тоня Мамаева", "Тоня", "мамочка", "", 3, ""])
+    people.append(["p-2", "Тоня Мамаевa", "", "", "", 1, ""])  # latin 'a': a typo
+    evidence = workbook.create_sheet("Evidence")
+    evidence.append(["entity_type", "entity_value", "candidate_text", "reason",
+                     "status", "source_folder", "reference", "run_id", "created_at"])
+    evidence.append(["person", "Тоня Мамаева", "Тоня", "manual correction",
+                     "CONFIRMED", "catalog.xlsx", "", "run-001", ""])
+    evidence.append(["person", "Тоня Мамаевa", "", "approved metadata vs source text",
+                     "CANDIDATE", "review-output", "020", "run-002", ""])
+    workbook.save(tmp_path / "catalog.xlsx")
+    workbook.close()
+
+    summary = read_summary(tmp_path)
+
+    assert summary.people == 2
+    assert summary.candidates == 1
+    # Only the entity whose provenance starts in the newest run.
+    assert summary.created_recently == ["Тоня Мамаевa"]
+
+    html = render_dashboard(Aggregate(groups=[]), dictionary=summary)
+    assert "new in the last run" in html
+    assert "Тоня Мамаевa" in html
+    assert "1 candidate aliases awaiting a decision" in html
+
+
+def test_dashboard_renders_without_a_catalog(tmp_path: Path) -> None:
+    from photoarchive.dashboard.aggregate import Aggregate
+    from photoarchive.dashboard.dictionary import read_summary
+    from photoarchive.dashboard.html import render_dashboard
+
+    summary = read_summary(tmp_path)
+
+    assert summary.missing
+    assert "Dictionary:" not in render_dashboard(Aggregate(groups=[]), dictionary=summary)

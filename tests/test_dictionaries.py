@@ -210,15 +210,23 @@ def test_approved_row_creates_places_and_tags(tmp_path: Path) -> None:
     assert outcome.new_tags == ["дача"]
 
 
-def test_unambiguous_correction_adds_a_confirmed_alias(tmp_path: Path) -> None:
+def test_an_unambiguous_correction_is_only_a_candidate(tmp_path: Path) -> None:
+    """Being the only phrase in the sentence is not proof of anything.
+
+    On real data this rule confirmed nonsense: a tag was taught to mean a
+    fragment of somebody's name, because the reviewer knew something the
+    document never said. Machines may now only propose; a person promotes.
+    """
     store = _store(tmp_path)
     row = _approved(people="Антонина Мамаева", source_description="Тоня Мамаева")
 
     outcome = learn_from_rows(store, [row])
 
     person = store.load().people[0]
-    assert "Тоня Мамаева" in person.confirmed_aliases
-    assert outcome.confirmed_aliases == ["Тоня Мамаева -> Антонина Мамаева"]
+    assert "Тоня Мамаева" in person.candidate_aliases
+    assert person.confirmed_aliases == ()
+    assert outcome.confirmed_aliases == []
+    assert outcome.candidate_aliases == ["Тоня Мамаева -> Антонина Мамаева"]
 
 
 def test_ambiguous_mapping_creates_candidates_not_confirmed_aliases(tmp_path: Path) -> None:
@@ -440,3 +448,20 @@ def test_empty_catalog_still_exports(tmp_path: Path) -> None:
 
     assert path.exists()
     assert (counts.people, counts.places, counts.tags) == (0, 0, 0)
+
+
+def test_a_refused_spelling_is_not_counted_as_learned(tmp_path: Path) -> None:
+    """Offering the same rejected phrase every run is not dictionary growth."""
+    store = _store(tmp_path)
+    row = _approved(people="Антонина Мамаева", source_description="Тоня Мамаева")
+    learn_from_rows(store, [row])
+
+    person_id = store.load().people[0].person_id
+    store.set_alias_status(
+        EntityType.PERSON, person_id, "Тоня Мамаева", ConfidenceStatus.REJECTED
+    )
+
+    outcome = learn_from_rows(store, [row])
+
+    assert outcome.candidate_aliases == []
+    assert store.load().people[0].rejected_aliases == ("Тоня Мамаева",)
