@@ -11,8 +11,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from photoarchive.catalog.discovery import discover_review_workbooks
+from photoarchive.coverage import (
+    NEEDS_DESCRIPTION,
+    FolderDescriptionStatus,
+    PhotoDescriptionCoverage,
+    classify,
+)
 from photoarchive.models import SourceRoot, WorkflowStatus
-from photoarchive.review.excel import REVIEW_FILENAME, ReviewWorkbookService
+from photoarchive.portable.models import STATE_DIRECTORY
+from photoarchive.portable.store import PortableStateStore
+from photoarchive.review.excel import REVIEW_FILENAME, ReviewWorkbookService, identity_key
 from photoarchive.review.model import ReviewRow
 
 #: Final fields whose emptiness a reviewer might want to filter on.
@@ -29,6 +37,50 @@ class FolderGroup:
     root_identity: str = ""
     source_url: str | None = None
     rows: list[ReviewRow] = field(default_factory=list)
+    #: What the source folder has by way of a description document. Read from
+    #: portable state, because a folder with no document and one with several
+    #: competing documents leave identical workbooks behind.
+    description_status: FolderDescriptionStatus = FolderDescriptionStatus.UNKNOWN
+    #: Filename of the document actually used, when exactly one was.
+    description_document: str | None = None
+    #: ``identity -> did the document have an entry for this row``. The one
+    #: durable fact the workbook cannot supply: an entry with empty text and a
+    #: photo the document never mentions produce identical rows.
+    source_entries: dict[str, bool] = field(default_factory=dict)
+
+    def coverage(self, row: ReviewRow) -> PhotoDescriptionCoverage | None:
+        """This row's coverage, or ``None`` outside a ``FOUND`` folder."""
+        return classify(
+            self.description_status,
+            source_entry_exists=self.source_entries.get(
+                identity_key(row.reference), False
+            ),
+            text=row.source_description,
+            section_context=row.section_context,
+            source_notes=row.source_notes,
+        )
+
+    @property
+    def coverage_counts(self) -> dict[PhotoDescriptionCoverage, int]:
+        """How many present photos fall into each coverage value."""
+        counts: dict[PhotoDescriptionCoverage, int] = {}
+        for row in self.rows:
+            if row.status is WorkflowStatus.DESCRIBED_ABSENT:
+                # A description entry with no photo is not a photo to describe.
+                continue
+            value = self.coverage(row)
+            if value is not None:
+                counts[value] = counts.get(value, 0) + 1
+        return counts
+
+    @property
+    def described(self) -> int:
+        return self.coverage_counts.get(PhotoDescriptionCoverage.DESCRIBED, 0)
+
+    @property
+    def needs_description(self) -> int:
+        counts = self.coverage_counts
+        return sum(counts.get(value, 0) for value in NEEDS_DESCRIPTION)
 
     @property
     def label(self) -> str:
@@ -118,10 +170,17 @@ def collect(
     Ordering is deterministic — source root, then folder, then the workbook's
     own row order — so regenerating an unchanged archive yields an identical
     page.
+
+    Source-description coverage is read from ``_archive_state/`` alongside the
+    workbooks: which document a folder had, and which rows the document
+    actually mentioned, are facts no `review.xlsx` can carry. State written
+    before those facts existed simply leaves coverage unobserved, which is
+    reported as such and never as "this folder has no description".
     """
     source_dir = Path(source_dir)
     by_name = {root.name: root for root in (source_roots or [])}
     service = ReviewWorkbookService()
+    state = _load_source_states(source_dir)
     groups: list[FolderGroup] = []
 
     for path in discover_review_workbooks(source_dir):
@@ -131,14 +190,19 @@ def collect(
         folder = "/".join(parts[1:])
 
         root = by_name.get(root_name)
+        identity = root.identity if root else ""
+        record, entries = _coverage_facts(state.get(identity), folder)
         groups.append(
             FolderGroup(
                 source_root=root_name,
                 folder=folder,
                 workbook_path=path,
-                root_identity=root.identity if root else "",
+                root_identity=identity,
                 source_url=root.url if root else None,
                 rows=list(service.read(path).values()),
+                description_status=record[0],
+                description_document=record[1],
+                source_entries=entries,
             )
         )
 
@@ -146,4 +210,53 @@ def collect(
     return Aggregate(groups=groups)
 
 
-__all__ = ["Aggregate", "FolderGroup", "REVIEW_FILENAME", "collect", "needs_review"]
+def _load_source_states(source_dir: Path) -> dict:
+    """Portable state beside the workbooks, or nothing if it is not there.
+
+    Read-only and best-effort: the dashboard is a view. Unreadable or absent
+    state leaves every folder unobserved rather than failing the render.
+    """
+    store = PortableStateStore(source_dir / STATE_DIRECTORY)
+    if not store.exists:
+        return {}
+    try:
+        return store.load().sources
+    except Exception:  # noqa: BLE001 - a broken snapshot must not break the view
+        return {}
+
+
+def _coverage_facts(
+    source_state, folder: str
+) -> tuple[tuple[FolderDescriptionStatus, str | None], dict[str, bool]]:
+    """The folder's description record and its per-row entry observations."""
+    if source_state is None:
+        return (FolderDescriptionStatus.UNKNOWN, None), {}
+
+    record = source_state.folders.get(folder)
+    if record is None:
+        # Never observed — which is a statement about our records, not about
+        # the source, so it must not read as "this folder has no document".
+        status, document = FolderDescriptionStatus.UNKNOWN, None
+    else:
+        try:
+            status = FolderDescriptionStatus(record.status)
+        except ValueError:
+            status = FolderDescriptionStatus.UNKNOWN
+        document = record.document
+
+    prefix = f"{folder}|"
+    entries = {
+        key[len(prefix):]: item.source_entry_exists
+        for key, item in source_state.items.items()
+        if key.startswith(prefix)
+    }
+    return (status, document), entries
+
+
+__all__ = [
+    "Aggregate",
+    "FolderGroup",
+    "REVIEW_FILENAME",
+    "collect",
+    "needs_review",
+]

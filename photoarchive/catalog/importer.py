@@ -48,6 +48,12 @@ class ImportOutcome:
     entities_added: list[str] = field(default_factory=list)
     aliases_confirmed: list[str] = field(default_factory=list)
     aliases_added_as_candidates: list[str] = field(default_factory=list)
+    #: Spellings a person ruled out; matching skips them and learning never
+    #: revives them.
+    aliases_rejected: list[str] = field(default_factory=list)
+    #: "<alias> -> <entity>" for an alias listed in two columns at once. A slip
+    #: to report, not a state: rejection wins, and the person is told.
+    collisions: list[str] = field(default_factory=list)
     promotions: list[str] = field(default_factory=list)
     #: "<absorbed> -> <survivor>" for duplicate entities merged into one.
     merged: list[str] = field(default_factory=list)
@@ -61,6 +67,7 @@ class ImportOutcome:
             len(self.entities_renamed)
             + len(self.entities_added)
             + len(self.aliases_confirmed)
+            + len(self.aliases_rejected)
             + len(self.promotions)
             + len(self.merged)
             + len(self.latlon_updated)
@@ -209,12 +216,51 @@ def _canonical_of(entity, entity_type: EntityType) -> str:
 def _sync_aliases(
     store, entity_type, entity_id, canonical, row, existing, outcome, run_id
 ) -> None:
-    """Apply the confirmed/candidate alias columns as the person left them."""
+    """Apply the alias columns as the person left them.
+
+    The column an alias sits in *is* the decision, so all three are read as
+    positive statements. An emptied cell says nothing: `catalog.xlsx` is
+    three-way merged, and another machine's copy may simply not have seen a
+    value yet — reading "gone" as "rejected" would turn a sync artefact into a
+    decision.
+    """
     confirmed = split_values(row.get("confirmed_aliases", ""))
     candidates = split_values(row.get("candidate_aliases", ""))
+    rejected = split_values(row.get("rejected_aliases", ""))
 
     previously_candidate = set(existing.candidate_aliases) if existing else set()
     previously_confirmed = set(existing.confirmed_aliases) if existing else set()
+    previously_rejected = set(existing.rejected_aliases) if existing else set()
+
+    # One alias in two columns is a slip, not a state. Rejection wins: acting on
+    # a spelling someone forbade is worse than ignoring one they allowed, and
+    # the collision is reported rather than silently resolved.
+    rejected_set = set(rejected)
+    for alias in sorted(rejected_set.intersection(confirmed).union(
+        rejected_set.intersection(candidates)
+    )):
+        outcome.collisions.append(f"{alias} -> {canonical}")
+    confirmed = [alias for alias in confirmed if alias not in rejected_set]
+    candidates = [alias for alias in candidates if alias not in rejected_set]
+
+    for alias in rejected:
+        if alias in previously_rejected:
+            continue
+        store.set_alias_status(
+            entity_type, entity_id, alias, ConfidenceStatus.REJECTED
+        )
+        outcome.aliases_rejected.append(f"{alias} -> {canonical}")
+        store.record_evidence(
+            Evidence(
+                entity_type=entity_type,
+                entity_value=canonical,
+                reason=EvidenceReason.MANUAL_CORRECTION,
+                candidate_text=alias,
+                status=ConfidenceStatus.REJECTED,
+                run_id=run_id,
+                source_folder="catalog.xlsx",
+            )
+        )
 
     for alias in confirmed:
         if alias in previously_confirmed:
@@ -230,7 +276,14 @@ def _sync_aliases(
                 outcome.merged.append(f"{absorbed} -> {canonical}")
                 continue
 
-        store.add_alias(entity_type, entity_id, alias, ConfidenceStatus.CONFIRMED)
+        if alias in previously_rejected:
+            # Moved back out of the rejected column: the person changed their
+            # mind, and `add_alias` would refuse to undo a rejection.
+            store.set_alias_status(
+                entity_type, entity_id, alias, ConfidenceStatus.CONFIRMED
+            )
+        else:
+            store.add_alias(entity_type, entity_id, alias, ConfidenceStatus.CONFIRMED)
         if alias in previously_candidate:
             # Moved out of the candidate column: an explicit promotion.
             outcome.promotions.append(f"{alias} -> {canonical}")
@@ -251,7 +304,12 @@ def _sync_aliases(
     for alias in candidates:
         if alias in previously_candidate or alias in previously_confirmed:
             continue
-        store.add_alias(entity_type, entity_id, alias, ConfidenceStatus.CANDIDATE)
+        if alias in previously_rejected:
+            store.set_alias_status(
+                entity_type, entity_id, alias, ConfidenceStatus.CANDIDATE
+            )
+        else:
+            store.add_alias(entity_type, entity_id, alias, ConfidenceStatus.CANDIDATE)
         outcome.aliases_added_as_candidates.append(f"{alias} -> {canonical}")
 
 

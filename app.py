@@ -42,6 +42,7 @@ from photoarchive.portable.catalog_state import export_catalog
 from photoarchive.portable.exporter import (
     ScannedSource,
     build_portable_snapshot,
+    folder_description_record,
     publish_snapshot,
     scanned_from_state,
 )
@@ -407,6 +408,7 @@ def _run_local_review(
 
     results = []
     row_states: dict[str, dict] = {}
+    folders: dict[str, object] = {}
     workbooks: list[Path] = []
     for folder in report.folders:
         LOG.info("Building review workbook for %r", folder.plan.folder_path or "/")
@@ -427,6 +429,9 @@ def _run_local_review(
         )
         results.append(result)
         row_states[folder.plan.folder_path] = result.states
+        folders[folder.plan.folder_path] = folder_description_record(
+            folder.plan, folder.error
+        )
         workbooks.append(result.workbook_path)
 
         outcome = result.outcome
@@ -481,6 +486,7 @@ def _run_local_review(
         source_root=source_root,
         items=items,
         row_states=row_states,
+        folders=folders,
         workbooks=workbooks,
     )
 
@@ -571,19 +577,24 @@ def command_run(args: argparse.Namespace, config: AppConfig) -> int:
         )
         command_learn(learn_args, config)
 
+    # Only once every earlier stage succeeded: portable state must never
+    # describe an archive that was not fully processed.
+    #
+    # Published *before* the dashboard, because the dashboard reads it. Source
+    # description coverage — which folders have a description document, and
+    # which rows that document mentions — lives only here, so rendering first
+    # would report this run's archive from the previous run's observations.
+    print("\n=== portable state ===")
+    code = _publish_portable_state(scanned, config, output_dir, args.verbose)
+    if code != 0:
+        return code
+
     if not args.skip_dashboard:
         print("\n=== dashboard ===")
         dashboard_args = argparse.Namespace(
             source=output_dir, output=None, verbose=args.verbose
         )
         command_dashboard(dashboard_args, config)
-
-    # Only once every earlier stage succeeded: portable state must never
-    # describe an archive that was not fully processed.
-    print("\n=== portable state ===")
-    code = _publish_portable_state(scanned, config, output_dir, args.verbose)
-    if code != 0:
-        return code
 
     print(f"\n=== done: {len(scanned)} source(s) scanned ===")
     return 0
@@ -884,6 +895,7 @@ def _render_learn(workbooks, rows, failed, import_outcome, outcome, *, dry_run: 
         f"Entities added: {len(import_outcome.entities_added)}",
         f"Confirmed aliases imported: {len(import_outcome.aliases_confirmed)}",
         f"Candidates promoted: {len(import_outcome.promotions)}",
+        f"Aliases rejected: {len(import_outcome.aliases_rejected)}",
         f"Duplicate entities merged: {len(import_outcome.merged)}",
         f"LatLon edited: {len(import_outcome.latlon_updated)}",
         f"LatLon promoted from candidate: {len(import_outcome.latlon_promoted)}",
@@ -895,6 +907,9 @@ def _render_learn(workbooks, rows, failed, import_outcome, outcome, *, dry_run: 
         LOG.debug("workbook input: %s", path)
     for problem in import_outcome.invalid:
         lines.append(f"  ! {problem}")
+    # An alias in two columns at once: reported, never silently resolved.
+    for collision in import_outcome.collisions:
+        lines.append(f"  ! listed as both rejected and allowed, rejection kept: {collision}")
     return "\n".join(lines)
 
 

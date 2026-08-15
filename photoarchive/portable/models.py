@@ -29,6 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from photoarchive.coverage import FolderDescriptionStatus
 from photoarchive.portable.provenance import OperationProvenance, format_timestamp
 
 #: Bumped only for incompatible changes; unknown future versions are refused
@@ -137,6 +138,10 @@ class ItemState:
     description_hash: str | None = None
     suggestion_hash: str | None = None
     was_absent: bool = False
+    #: Did the folder's description document have an entry for this row? A raw
+    #: observation: an entry with empty text and a photo the document never
+    #: mentions leave identical workbook rows, and only this tells them apart.
+    source_entry_exists: bool = False
 
     drive_file_id: str | None = None
     drive_path: str | None = None
@@ -165,6 +170,7 @@ class ItemState:
             "description_hash": self.description_hash,
             "suggestion_hash": self.suggestion_hash,
             "was_absent": self.was_absent,
+            "source_entry_exists": self.source_entry_exists,
         }
         if self.build_fingerprint or self.last_build:
             payload["last_build"] = {
@@ -204,6 +210,44 @@ class ItemState:
             description_hash=data.get("description_hash"),
             suggestion_hash=data.get("suggestion_hash"),
             was_absent=bool(data.get("was_absent", False)),
+            source_entry_exists=bool(data.get("source_entry_exists", False)),
+        )
+
+
+@dataclass(slots=True)
+class FolderDescriptionRecord:
+    """What one photo-containing folder has by way of a description document.
+
+    Durable because it cannot be recovered from the workbooks: a folder with no
+    document and one with several competing documents produce identical
+    ``review.xlsx`` files, and the rule that picks a document lives in the
+    scanner. What is stored is the *resolved* outcome, so the dashboard never
+    has to reimplement that rule — and a folder with no record at all means
+    "not yet observed", never "no description document".
+    """
+
+    folder_path: str
+    status: str = FolderDescriptionStatus.UNKNOWN.value
+    #: Filename of the document actually used, when exactly one was.
+    document: str | None = None
+    #: Every ``.docx`` seen in the folder — the evidence behind AMBIGUOUS.
+    candidates: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "folder_path": self.folder_path,
+            "status": self.status,
+            "document": self.document,
+            "candidates": list(self.candidates),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> FolderDescriptionRecord:
+        return cls(
+            folder_path=str(data.get("folder_path", "")),
+            status=str(data.get("status", FolderDescriptionStatus.UNKNOWN.value)),
+            document=data.get("document"),
+            candidates=[str(name) for name in (data.get("candidates") or [])],
         )
 
 
@@ -262,6 +306,8 @@ class SourceState:
     source_items: dict[str, SourceItemObservation] = field(default_factory=dict)
     #: Sync baselines for the per-folder workbooks under this root.
     artifacts: dict[str, ArtifactSyncState] = field(default_factory=dict)
+    #: Description-document state per photo-containing folder.
+    folders: dict[str, FolderDescriptionRecord] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -279,6 +325,9 @@ class SourceState:
             },
             "artifacts": {
                 key: self.artifacts[key].as_dict() for key in sorted(self.artifacts)
+            },
+            "folders": {
+                key: self.folders[key].as_dict() for key in sorted(self.folders)
             },
         }
 
@@ -302,6 +351,10 @@ class SourceState:
             artifacts={
                 key: ArtifactSyncState.from_dict(value)
                 for key, value in (data.get("artifacts") or {}).items()
+            },
+            folders={
+                key: FolderDescriptionRecord.from_dict(value)
+                for key, value in (data.get("folders") or {}).items()
             },
         )
 

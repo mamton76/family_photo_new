@@ -31,13 +31,18 @@ from photoarchive.catalog.store import DictionaryStore
 
 CATALOG_FILENAME = "catalog.xlsx"
 
-CATALOG_SHEETS: tuple[str, ...] = ("People", "Places", "Tags")
+#: ``Evidence`` is generated and read-only: the importer reads the three
+#: dictionary sheets by name and never looks at it.
+EVIDENCE_SHEET = "Evidence"
+
+CATALOG_SHEETS: tuple[str, ...] = ("People", "Places", "Tags", EVIDENCE_SHEET)
 
 PEOPLE_COLUMNS: tuple[str, ...] = (
     "person_id",
     "canonical_name",
     "confirmed_aliases",
     "candidate_aliases",
+    "rejected_aliases",
     "evidence_count",
     "notes",
 )
@@ -47,6 +52,7 @@ PLACES_COLUMNS: tuple[str, ...] = (
     "canonical_place",
     "confirmed_aliases",
     "candidate_aliases",
+    "rejected_aliases",
     "latlon",
     "candidate_latlon",
     "map_link",
@@ -59,6 +65,7 @@ TAGS_COLUMNS: tuple[str, ...] = (
     "canonical_tag",
     "confirmed_aliases",
     "candidate_aliases",
+    "rejected_aliases",
     "evidence_count",
     "notes",
 )
@@ -67,9 +74,25 @@ _HEADER_FILL = PatternFill("solid", fgColor="DDE5F0")
 #: Amber: this cell holds a hint, not a fact.
 _CANDIDATE_FILL = PatternFill("solid", fgColor="FFF2CC")
 
+#: Grey: a spelling a person has ruled out. Kept visible so it can be undone.
+_REJECTED_FILL = PatternFill("solid", fgColor="E8E8E8")
+
+EVIDENCE_COLUMNS: tuple[str, ...] = (
+    "entity_type",
+    "entity_value",
+    "candidate_text",
+    "reason",
+    "status",
+    "source_folder",
+    "reference",
+    "run_id",
+    "created_at",
+)
+
 _LIST_SEPARATOR = "; "
 
 _CANDIDATE_COLUMNS = frozenset({"candidate_aliases", "candidate_latlon"})
+_REJECTED_COLUMNS = frozenset({"rejected_aliases"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +143,7 @@ class CatalogService:
         self._write_people(workbook, store, dictionary)
         self._write_places(workbook, store, dictionary)
         self._write_tags(workbook, store, dictionary)
+        self._write_evidence(workbook, store)
 
         if _signature(workbook) == _existing_signature(path):
             workbook.close()
@@ -144,6 +168,7 @@ class CatalogService:
                     "canonical_name": person.canonical_name,
                     "confirmed_aliases": _join(person.confirmed_aliases),
                     "candidate_aliases": _join(person.candidate_aliases),
+                    "rejected_aliases": _join(person.rejected_aliases),
                     "evidence_count": store.evidence_count(
                         EntityType.PERSON, person.canonical_name
                     ),
@@ -165,6 +190,7 @@ class CatalogService:
                     "canonical_place": place.canonical_place,
                     "confirmed_aliases": _join(place.confirmed_aliases),
                     "candidate_aliases": _join(place.candidate_aliases),
+                    "rejected_aliases": _join(place.rejected_aliases),
                     "latlon": place.latlon.format() if place.latlon else "",
                     "candidate_latlon": _join(
                         point.format() for point in place.candidate_latlon
@@ -191,6 +217,7 @@ class CatalogService:
                     "canonical_tag": tag.canonical_tag,
                     "confirmed_aliases": _join(tag.confirmed_aliases),
                     "candidate_aliases": _join(tag.candidate_aliases),
+                    "rejected_aliases": _join(tag.rejected_aliases),
                     "evidence_count": store.evidence_count(
                         EntityType.TAG, tag.canonical_tag
                     ),
@@ -198,6 +225,40 @@ class CatalogService:
                 },
             )
         _size(sheet, TAGS_COLUMNS)
+
+    def _write_evidence(self, workbook, store) -> None:
+        """The provenance trail, so a candidate can be judged, not guessed at.
+
+        Generated and read-only: `evidence_count` says how much stands behind a
+        row, and this sheet says *what*. Rejecting a proposal without being able
+        to read why it was offered would be guesswork.
+        """
+        sheet = workbook.create_sheet(EVIDENCE_SHEET)
+        _write_header(sheet, EVIDENCE_COLUMNS)
+        for index, evidence in enumerate(store.all_evidence(), start=2):
+            _write_row(
+                sheet,
+                index,
+                EVIDENCE_COLUMNS,
+                {
+                    "entity_type": evidence.entity_type.value,
+                    "entity_value": evidence.entity_value,
+                    "candidate_text": evidence.candidate_text or (
+                        evidence.proposed_latlon.format()
+                        if evidence.proposed_latlon
+                        else ""
+                    ),
+                    "reason": evidence.reason.value,
+                    "status": evidence.status.value,
+                    "source_folder": evidence.source_folder or "",
+                    "reference": evidence.reference or "",
+                    "run_id": evidence.run_id or "",
+                    "created_at": (
+                        evidence.created_at.isoformat() if evidence.created_at else ""
+                    ),
+                },
+            )
+        _size(sheet, EVIDENCE_COLUMNS)
 
 
 def _signature(workbook) -> str:
@@ -255,6 +316,8 @@ def _write_row(sheet, row_index: int, columns: tuple[str, ...], values: dict) ->
         # can never mistake a hint for confirmed knowledge.
         if name in _CANDIDATE_COLUMNS and values.get(name):
             cell.fill = _CANDIDATE_FILL
+        elif name in _REJECTED_COLUMNS and values.get(name):
+            cell.fill = _REJECTED_FILL
 
 
 def _size(sheet, columns: tuple[str, ...]) -> None:

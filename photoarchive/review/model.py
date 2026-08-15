@@ -24,6 +24,11 @@ REASON_DESCRIPTION_CHANGED_AFTER_APPROVAL = "Description changed after approval"
 REASON_SOURCE_PHOTO_CHANGED = "Source photo changed"
 REASON_PREVIOUSLY_ABSENT_FOUND = "Previously absent photo found"
 REASON_SOURCE_MISSING = "Source photo no longer present"
+REASON_PHOTO_RETURNED = "Photo returned"
+#: The description document no longer has an entry for this row, but the source
+#: columns still hold what it last said. The text is kept — it is the last thing
+#: the source said about this photo — and flagged rather than quietly trusted.
+REASON_SOURCE_TEXT_STALE = "Description entry removed; source text below is stale"
 REASON_MAP_LINK_APPLIED = "LatLon updated from Map Link"
 REASON_MAP_LINK_UNPARSED = "Map Link could not be parsed; LatLon left unchanged"
 

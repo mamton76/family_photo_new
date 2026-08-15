@@ -79,6 +79,14 @@ class Person:
             if alias.status is ConfidenceStatus.CANDIDATE
         )
 
+    @property
+    def rejected_aliases(self) -> tuple[str, ...]:
+        return tuple(
+            alias.text
+            for alias in self.aliases
+            if alias.status is ConfidenceStatus.REJECTED
+        )
+
 
 @dataclass(slots=True)
 class Place:
@@ -104,6 +112,14 @@ class Place:
             if alias.status is ConfidenceStatus.CANDIDATE
         )
 
+    @property
+    def rejected_aliases(self) -> tuple[str, ...]:
+        return tuple(
+            alias.text
+            for alias in self.aliases
+            if alias.status is ConfidenceStatus.REJECTED
+        )
+
 
 @dataclass(slots=True)
 class Tag:
@@ -122,6 +138,14 @@ class Tag:
             alias.text
             for alias in self.aliases
             if alias.status is ConfidenceStatus.CANDIDATE
+        )
+
+    @property
+    def rejected_aliases(self) -> tuple[str, ...]:
+        return tuple(
+            alias.text
+            for alias in self.aliases
+            if alias.status is ConfidenceStatus.REJECTED
         )
 
 

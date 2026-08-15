@@ -38,10 +38,12 @@ from pathlib import Path
 from photoarchive.catalog.store import DictionaryStore
 from photoarchive.models import RemoteSourceItem, SourceRoot
 from photoarchive.portable.catalog_state import export_catalog
+from photoarchive.coverage import FolderDescriptionStatus
 from photoarchive.portable.models import (
     ArtifactSyncState,
     ItemState,
     Manifest,
+    FolderDescriptionRecord,
     SourceItemObservation,
     SourceState,
 )
@@ -66,8 +68,41 @@ class ScannedSource:
     items: list[RemoteSourceItem] = field(default_factory=list)
     #: ``folder path -> {identity -> RowState}``, exactly as the scan produced.
     row_states: dict[str, dict[str, RowState]] = field(default_factory=dict)
+    #: ``folder path -> FolderDescriptionRecord`` for every folder the scan
+    #: planned. Only a real scan can observe this, which is why it is passed in
+    #: rather than derived: an absent record means "not observed".
+    folders: dict[str, FolderDescriptionRecord] = field(default_factory=dict)
     #: Local paths of the workbooks written for this source.
     workbooks: list[Path] = field(default_factory=list)
+
+
+def folder_description_record(plan, error: str | None = None) -> FolderDescriptionRecord:
+    """Resolve one scanned folder's description state, once, at the source.
+
+    The rule that picks a document — exactly one wins, several are a conflict,
+    zero means none — lives in :class:`~photoarchive.scanning.scanner.FolderScanPlan`.
+    Recording the *outcome* here is what stops the dashboard from having to
+    reimplement it later, from data that cannot express the difference.
+
+    A document that exists but could not be read is not a source condition; the
+    folder simply stays unobserved rather than being reported as having none.
+    """
+    if error:
+        status = FolderDescriptionStatus.UNKNOWN
+    elif plan.has_ambiguous_description:
+        status = FolderDescriptionStatus.AMBIGUOUS
+    elif plan.has_description:
+        status = FolderDescriptionStatus.FOUND
+    else:
+        status = FolderDescriptionStatus.ABSENT
+
+    document = plan.description
+    return FolderDescriptionRecord(
+        folder_path=plan.folder_path,
+        status=status.value,
+        document=document.name if document else None,
+        candidates=[item.name for item in plan.docx_candidates],
+    )
 
 
 def row_key(folder_path: str, identity: str) -> str:
@@ -156,6 +191,9 @@ def _merge_source(
             refreshed[key] = item
 
     state.items = refreshed
+    # Folders the scan actually visited. Others keep whatever was known, so a
+    # scoped run never downgrades an untouched folder to "not observed".
+    state.folders.update(observation.folders)
     _merge_workbook_artifacts(state, observation)
     return state
 
@@ -171,6 +209,7 @@ def _apply_row_state(item: ItemState, row_state: RowState) -> None:
     item.suggestion_hash = row_state.suggestion_hash or None
     item.status = row_state.status or item.status
     item.was_absent = row_state.was_absent
+    item.source_entry_exists = row_state.source_entry_exists
 
 
 def _apply_physical(

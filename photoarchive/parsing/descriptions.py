@@ -37,6 +37,7 @@ import hashlib
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Protocol
 
 from photoarchive.models import RemoteSourceItem, WorkflowStatus
@@ -47,13 +48,38 @@ from photoarchive.naming import filename_stem, split_fragments
 #: so an ordinary continuation paragraph is never mistaken for a heading.
 SECTION_PREFIXES: tuple[str, ...] = ("далее",)
 
-#: Source notes lifted out of description text and preserved verbatim.
-SOURCE_NOTE_PATTERNS: tuple[str, ...] = ("нет фото",)
+class SourceNoteKind(str, Enum):
+    """What a source note *means*, which is not the same as what it says.
+
+    Coverage reporting asks whether a photo has any real description behind it,
+    and a note only counts if it carries description. ``нет фото`` states the
+    condition of the source — the paper original is lost — and says nothing
+    about the photograph, so it must never make a row look described.
+    """
+
+    #: A fact about the source material itself, not about the photo.
+    SOURCE_STATE = "SOURCE_STATE"
+    #: Genuine historical content: provenance, dating, attribution.
+    DESCRIPTIVE = "DESCRIPTIVE"
+
+
+#: Source notes lifted out of description text and preserved verbatim, each
+#: with its meaning. A mapping rather than a list on purpose: a new pattern
+#: cannot be added without deciding whether it describes the photograph, and so
+#: cannot silently start counting as a description.
+SOURCE_NOTE_PATTERNS: dict[str, SourceNoteKind] = {
+    "нет фото": SourceNoteKind.SOURCE_STATE,
+}
 
 _SOURCE_NOTE_RE = re.compile(
     r"\s*[-–—]?\s*(?P<note>" + "|".join(SOURCE_NOTE_PATTERNS) + r")\s*",
     re.IGNORECASE,
 )
+
+
+def source_note_kind(note: str) -> SourceNoteKind:
+    """Classify one extracted note. Unknown text is never assumed descriptive."""
+    return SOURCE_NOTE_PATTERNS.get(note.strip().casefold(), SourceNoteKind.SOURCE_STATE)
 
 #: The leading token of a paragraph — the only candidate for a reference.
 _TOKEN_RE = re.compile(r"^(?P<token>[A-Za-z0-9][A-Za-z0-9_.\-]*)(?=\s|$)")

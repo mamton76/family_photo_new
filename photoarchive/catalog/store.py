@@ -224,6 +224,33 @@ class DictionaryStore:
                     (status.value, entity_type.value, entity_id, alias),
                 )
 
+    def set_alias_status(
+        self,
+        entity_type: EntityType,
+        entity_id: str,
+        alias: str,
+        status: ConfidenceStatus,
+    ) -> None:
+        """Set an alias's status outright, on a person's explicit instruction.
+
+        :meth:`add_alias` only ever upgrades, which is what keeps a machine
+        pass from quietly undoing a human decision. That guard is not meant to
+        stand between a person and their own catalog: moving an alias into the
+        rejected column, or back out of it, must work in both directions.
+        """
+        with self.connect() as connection:
+            changed = connection.execute(
+                "UPDATE aliases SET status = ?"
+                " WHERE entity_type = ? AND entity_id = ? AND alias = ?",
+                (status.value, entity_type.value, entity_id, alias),
+            ).rowcount
+            if not changed:
+                connection.execute(
+                    "INSERT INTO aliases (entity_type, entity_id, alias, status)"
+                    " VALUES (?, ?, ?, ?)",
+                    (entity_type.value, entity_id, alias, status.value),
+                )
+
     def set_place_latlon(self, place_id: str, latlon: LatLon) -> None:
         """Set a place's confirmed coordinates."""
         with self.connect() as connection:
@@ -441,6 +468,12 @@ class DictionaryStore:
 
         return Dictionary(people=people, places=places, tags=tags)
 
+    def all_evidence(self) -> list[Evidence]:
+        """Every recorded reason, oldest first — the whole provenance trail."""
+        with self.connect() as connection:
+            rows = connection.execute("SELECT * FROM evidence ORDER BY id").fetchall()
+        return [_evidence_from_row(row) for row in rows]
+
     def evidence_for(self, entity_type: EntityType, entity_value: str) -> list[Evidence]:
         """Return every recorded reason concerning one entity."""
         with self.connect() as connection:
@@ -450,24 +483,7 @@ class DictionaryStore:
                 (entity_type.value, entity_value),
             ).fetchall()
 
-        return [
-            Evidence(
-                entity_type=EntityType(row["entity_type"]),
-                entity_value=row["entity_value"],
-                reason=EvidenceReason(row["reason"]),
-                candidate_text=row["candidate_text"],
-                proposed_latlon=parse_latlon(row["proposed_latlon"]),
-                source_root=row["source_root"],
-                source_folder=row["source_folder"],
-                reference=row["reference"],
-                source_description=row["source_description"],
-                section_context=row["section_context"],
-                run_id=row["run_id"],
-                status=ConfidenceStatus(row["status"]),
-                created_at=datetime.fromisoformat(row["created_at"]),
-            )
-            for row in rows
-        ]
+        return [_evidence_from_row(row) for row in rows]
 
     def evidence_count(self, entity_type: EntityType, entity_value: str) -> int:
         with self.connect() as connection:
@@ -477,3 +493,22 @@ class DictionaryStore:
                 (entity_type.value, entity_value),
             ).fetchone()
         return int(row["total"])
+
+
+def _evidence_from_row(row) -> Evidence:
+    """Rebuild one :class:`Evidence` record from its stored row."""
+    return Evidence(
+        entity_type=EntityType(row["entity_type"]),
+        entity_value=row["entity_value"],
+        reason=EvidenceReason(row["reason"]),
+        candidate_text=row["candidate_text"],
+        proposed_latlon=parse_latlon(row["proposed_latlon"]),
+        source_root=row["source_root"],
+        source_folder=row["source_folder"],
+        reference=row["reference"],
+        source_description=row["source_description"],
+        section_context=row["section_context"],
+        run_id=row["run_id"],
+        status=ConfidenceStatus(row["status"]),
+        created_at=datetime.fromisoformat(row["created_at"]),
+    )

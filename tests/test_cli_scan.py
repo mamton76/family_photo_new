@@ -78,3 +78,40 @@ def test_scan_reports_the_missing_transport_in_plain_words(
     assert "Scanner.scan" not in message
     # The source connection is released even on the failure path.
     assert source.closed
+
+
+# -- `run`: the dashboard reads what this run observed ---------------------
+
+
+def test_run_publishes_portable_state_before_rendering_the_dashboard(
+    monkeypatch, tmp_path
+) -> None:
+    """Source-description coverage lives only in portable state.
+
+    Rendering first would describe this run's archive using the previous run's
+    observations — a folder scanned minutes ago would still read "not yet
+    observed". The ordering is the whole guarantee, so it is pinned here.
+    """
+    config = app.AppConfig.load(REPO_ROOT / "config.example.yaml")
+    order: list[str] = []
+
+    monkeypatch.setattr(app, "_configured_sources", lambda _config: ["url"])
+    monkeypatch.setattr(app, "YandexDiskStorage", _StubSource)
+    monkeypatch.setattr(
+        app, "_run_local_review", lambda *a, **k: order.append("scan") or object()
+    )
+    monkeypatch.setattr(
+        app,
+        "_publish_portable_state",
+        lambda *a, **k: order.append("publish") or 0,
+    )
+    monkeypatch.setattr(
+        app, "command_dashboard", lambda *a, **k: order.append("dashboard") or 0
+    )
+
+    args = argparse.Namespace(
+        output_dir=tmp_path, skip_learn=True, skip_dashboard=False, verbose=False
+    )
+    assert app.command_run(args, config) == 0
+
+    assert order == ["scan", "publish", "dashboard"]

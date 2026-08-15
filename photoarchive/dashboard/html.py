@@ -17,6 +17,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+from photoarchive.coverage import FolderDescriptionStatus, PhotoDescriptionCoverage
 from photoarchive.dashboard.aggregate import Aggregate, FolderGroup, needs_review
 from photoarchive.dashboard.links import PhotoDestinations, links_for
 from photoarchive.dashboard.preview import PreviewProvider
@@ -70,6 +71,7 @@ color:var(--absent);font-size:12px;text-align:center;padding:8px}
 .status{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;
 background:#eef1f5;color:var(--muted)}
 .status.DESCRIBED_ABSENT{background:#f3f4f6;color:var(--absent)}
+.group>summary .coverage{margin-left:auto;color:#6b7280;font-size:12px;font-weight:400}
 .status.REVIEW,.status.SOURCE_CHANGED{background:#fef3c7;color:var(--warn)}
 .status.APPROVED,.status.BUILT,.status.PUBLISHED{background:#dcfce7;color:#15803d}
 .reason{color:var(--warn);font-size:12px;margin-top:4px}
@@ -265,9 +267,56 @@ def _render_group(group: FolderGroup, previews: PreviewProvider | None) -> str:
     cards = "".join(_render_card(group, row, previews) for row in group.rows)
     return (
         f"<details class='group' open><summary><span>{_escape(group.label)}</span>"
-        f"<span class='count'>{len(group.rows)} rows</span></summary>"
-        f"{cards}</details>"
+        f"<span class='count'>{len(group.rows)} rows</span>"
+        f"<span class='coverage'>{_escape(coverage_summary(group))}</span>"
+        f"</summary>{cards}</details>"
     )
+
+
+def coverage_summary(group: FolderGroup) -> str:
+    """One line about what the source says, in the folder's own terms.
+
+    Each folder state gets its own sentence rather than a number that would
+    mean something different in each. In particular an unobserved folder is
+    never reported as needing anything: that would turn a gap in our records
+    into a claim about the source.
+    """
+    photos = group.present_photos
+    if group.description_status is FolderDescriptionStatus.UNKNOWN:
+        return f"{photos} photos · description coverage: not yet observed"
+    if group.description_status is FolderDescriptionStatus.ABSENT:
+        return (
+            f"{photos} photos · description document: absent · "
+            f"{photos} need manual description"
+        )
+    if group.description_status is FolderDescriptionStatus.AMBIGUOUS:
+        return (
+            f"{photos} photos · description document: ambiguous · "
+            "coverage unresolved"
+        )
+
+    line = f"{photos} photos · {group.described} described · {group.needs_description} need description"
+    breakdown = _coverage_breakdown(group)
+    return f"{line} ({breakdown})" if breakdown else line
+
+
+#: Reader-facing wording for the reasons a photo still needs a description.
+_BREAKDOWN_LABELS: tuple[tuple[PhotoDescriptionCoverage, str], ...] = (
+    (PhotoDescriptionCoverage.CONTEXT_ONLY, "context only"),
+    (PhotoDescriptionCoverage.ENTRY_EMPTY, "empty entries"),
+    (PhotoDescriptionCoverage.NO_ENTRY, "no entry"),
+)
+
+
+def _coverage_breakdown(group: FolderGroup) -> str:
+    """Why those photos need a description — the detail behind the count."""
+    counts = group.coverage_counts
+    parts = [
+        f"{counts[value]} {label}"
+        for value, label in _BREAKDOWN_LABELS
+        if counts.get(value)
+    ]
+    return " · ".join(parts)
 
 
 def _render_card(

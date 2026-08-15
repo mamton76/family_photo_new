@@ -27,6 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from photoarchive.catalog.places import PlaceResolution
+from photoarchive.coverage import is_stale_source_text
 from photoarchive.geo import parse_map_link
 from photoarchive.models import WorkflowStatus
 from photoarchive.parsing.descriptions import ReconciledEntry, Reconciliation
@@ -37,8 +38,10 @@ from photoarchive.review.model import (
     REASON_DESCRIPTION_CHANGED_AFTER_APPROVAL,
     REASON_MAP_LINK_APPLIED,
     REASON_MAP_LINK_UNPARSED,
+    REASON_PHOTO_RETURNED,
     REASON_PREVIOUSLY_ABSENT_FOUND,
     REASON_SOURCE_MISSING,
+    REASON_SOURCE_TEXT_STALE,
     REASON_SOURCE_PHOTO_CHANGED,
     ReviewRow,
     join_values,
@@ -77,6 +80,11 @@ class RowState:
     suggestion_hash: str = ""
     status: str = WorkflowStatus.NEW.value
     was_absent: bool = False
+    #: Whether the folder's description document had an entry for this row.
+    #: A raw observation, not a classification: an entry with empty text and a
+    #: photo the document never mentions leave identical workbook rows, so
+    #: nothing else can tell them apart later.
+    source_entry_exists: bool = False
 
 
 @dataclass(slots=True)
@@ -100,6 +108,10 @@ class BuildOutcome:
     place_lookups: list[str] = field(default_factory=list)
     #: Rows whose final Place matched several confirmed places.
     ambiguous_places: list[str] = field(default_factory=list)
+    #: Rows carrying source text their description document no longer supplies.
+    stale_source_text: list[str] = field(default_factory=list)
+    #: Rows whose photo disappeared earlier and has now come back.
+    photos_returned: list[str] = field(default_factory=list)
 
 
 def build_rows(
@@ -219,6 +231,7 @@ def _build_entry_row(
             suggestion_hash=suggestion_hash,
             status=row.status.value,
             was_absent=photo is None,
+            source_entry_exists=True,
         )
 
     # Existing row: source text and suggestions are refreshed, finals are not.
@@ -239,6 +252,10 @@ def _build_entry_row(
     if was_absent and photo is not None:
         _flag(row, WorkflowStatus.REVIEW, REASON_PREVIOUSLY_ABSENT_FOUND)
         outcome.became_present.append(key)
+    elif _returned(previous, photo is not None):
+        # Not "the source photo changed": nothing changed, it came back.
+        _flag(row, WorkflowStatus.REVIEW, REASON_PHOTO_RETURNED)
+        outcome.photos_returned.append(key)
     elif photo_moved:
         _flag(row, WorkflowStatus.REVIEW, REASON_SOURCE_PHOTO_CHANGED)
         outcome.photo_changed.append(key)
@@ -265,6 +282,7 @@ def _build_entry_row(
         suggestion_hash=suggestion_hash,
         status=row.status.value,
         was_absent=photo is None,
+        source_entry_exists=True,
     )
 
 
@@ -307,11 +325,16 @@ def _build_photo_row(
     outcome.autofilled.extend(f"{key}.{name}" for name in row.fill_empty_final_fields())
     _apply_map_link(row, outcome, key)
 
-    if previous and photo_hash and previous.photo_hash != photo_hash:
+    if _returned(previous, True):
+        _flag(row, WorkflowStatus.REVIEW, REASON_PHOTO_RETURNED)
+        outcome.photos_returned.append(key)
+    elif previous and photo_hash and previous.photo_hash != photo_hash:
         _flag(row, WorkflowStatus.REVIEW, REASON_SOURCE_PHOTO_CHANGED)
         outcome.photo_changed.append(key)
     else:
         outcome.unchanged.append(key)
+
+    _mark_stale_source_text(row, outcome, key)
 
     return row, RowState(
         identity=key,
@@ -425,6 +448,38 @@ def _apply_map_link(row: ReviewRow, outcome: BuildOutcome, key: str) -> None:
     row.latlon = formatted
     row.review_reason = REASON_MAP_LINK_APPLIED
     outcome.map_links_applied.append(key)
+
+
+def _returned(previous: RowState | None, present: bool) -> bool:
+    """True when a photo the pipeline had given up on is back in the source."""
+    return bool(
+        present
+        and previous is not None
+        and previous.status == WorkflowStatus.SOURCE_MISSING.value
+    )
+
+
+def _mark_stale_source_text(row: ReviewRow, outcome: BuildOutcome, key: str) -> None:
+    """Flag source text the description document no longer supplies.
+
+    Derived, not stored: a row with no entry whose source columns still hold
+    text is stale by definition, and the flag clears itself when the entry
+    comes back. The text stays — it is the last thing the source said — and the
+    diagnostic goes in ``Review Reason`` without touching ``Status``, because
+    this says something about the source, not about the review.
+    """
+    stale = is_stale_source_text(
+        source_entry_exists=False,
+        text=row.source_description,
+        section_context=row.section_context,
+        source_notes=row.source_notes,
+    )
+    if not stale:
+        return
+    outcome.stale_source_text.append(key)
+    # A stronger reason from this same pass wins the single Reason cell.
+    if not row.review_reason.strip():
+        row.review_reason = REASON_SOURCE_TEXT_STALE
 
 
 def _flag(row: ReviewRow, status: WorkflowStatus, reason: str) -> None:

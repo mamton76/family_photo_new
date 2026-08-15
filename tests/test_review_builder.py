@@ -14,8 +14,10 @@ from photoarchive.review.model import (
     REASON_DESCRIPTION_CHANGED,
     REASON_DESCRIPTION_CHANGED_AFTER_APPROVAL,
     REASON_PREVIOUSLY_ABSENT_FOUND,
+    REASON_PHOTO_RETURNED,
     REASON_SOURCE_MISSING,
     REASON_SOURCE_PHOTO_CHANGED,
+    REASON_SOURCE_TEXT_STALE,
 )
 
 
@@ -461,3 +463,75 @@ def test_skip_still_survives_when_a_described_photo_returns() -> None:
 
     assert rescan.rows[0].status is WorkflowStatus.SKIP
     assert rescan.rows[0].review_reason == REASON_PREVIOUSLY_ABSENT_FOUND
+
+
+# -- A photo that comes back, and text its document no longer supplies ------
+
+
+def test_a_returning_photo_says_so_rather_than_claiming_it_changed() -> None:
+    outcome, states = _first_scan()
+    row = outcome.rows[0]
+
+    gone, states = build_rows(
+        _reconciliation(), {}, existing={"020": row}, states=states
+    )
+    assert gone.rows[0].status is WorkflowStatus.SOURCE_MISSING
+
+    back, _ = build_rows(
+        _reconciliation((_entry("020"), _photo("020.jpg"))),
+        {"020": SUGGESTION},
+        existing={"020": gone.rows[0]},
+        states=states,
+    )
+
+    returned = back.rows[0]
+    assert returned.status is WorkflowStatus.REVIEW
+    assert returned.review_reason == REASON_PHOTO_RETURNED
+    assert back.photos_returned == ["020"]
+
+
+def test_an_undescribed_photo_that_returns_is_reported_the_same_way() -> None:
+    photo = _photo("021.jpg")
+    outcome, states = build_rows(_reconciliation(undescribed=[photo]), {})
+
+    gone, states = build_rows(
+        _reconciliation(), {}, existing={"021": outcome.rows[0]}, states=states
+    )
+    back, _ = build_rows(
+        _reconciliation(undescribed=[photo]),
+        {},
+        existing={"021": gone.rows[0]},
+        states=states,
+    )
+
+    assert back.rows[0].review_reason == REASON_PHOTO_RETURNED
+    assert back.photos_returned == ["021"]
+
+
+def test_text_left_by_a_deleted_entry_is_kept_and_flagged_as_stale() -> None:
+    """The document is gone; what it last said is not thrown away."""
+    outcome, states = _first_scan(text="Тоня у школы")
+    row = outcome.rows[0]
+    assert row.source_description == "Тоня у школы"
+
+    # The DOCX disappears: the photo is still there, now undescribed.
+    rescan, _ = build_rows(
+        _reconciliation(undescribed=[_photo("020.jpg")]),
+        {},
+        existing={"020": row},
+        states=states,
+    )
+
+    updated = rescan.rows[0]
+    assert updated.source_description == "Тоня у школы"
+    assert updated.review_reason == REASON_SOURCE_TEXT_STALE
+    assert rescan.stale_source_text == ["020"]
+    # A source-quality remark, not a workflow decision.
+    assert updated.status is WorkflowStatus.NEW
+
+
+def test_a_row_that_never_had_a_description_is_not_stale() -> None:
+    outcome, _ = build_rows(_reconciliation(undescribed=[_photo("021.jpg")]), {})
+
+    assert outcome.stale_source_text == []
+    assert outcome.rows[0].review_reason == ""

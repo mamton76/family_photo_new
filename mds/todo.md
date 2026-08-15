@@ -77,11 +77,9 @@ Semantics live in `family-photo-archive-project.md` → "Source-description
 coverage". Ready to build; the open items below are deliberate defaults to
 choose while implementing, not design questions.
 
-- [ ] Portable-state read path in `dashboard/aggregate.py` — `collect()` reads
-      only workbooks today, and both the folder record and `source_entry_exists`
-      live in `_archive_state/`. No machine columns in `review.xlsx`, so the
-      three-way merge stays untouched
-- [ ] Per-folder summary + the four-value breakdown; no archive-wide count
+- [x] Portable-state read path in `dashboard/aggregate.py`; no machine columns
+      in `review.xlsx`, so the three-way merge stays untouched
+- [x] Per-folder summary + the four-value breakdown; no archive-wide count
 - [ ] Where the breakdown lives: expanded folder details, a filter, or both
 - [ ] Filter granularity — four values, two buckets, or both
 - [ ] Wording/badges for `ABSENT` / `AMBIGUOUS` / `UNKNOWN`, and how visibly
@@ -102,17 +100,16 @@ manual review plus learning is the deliberate bootstrap.
 Design **decided** — see the architecture doc's "Confirmed vs candidate" →
 "Rejecting a proposal". Rejection ships together with the evidence view.
 
-- [ ] `rejected_aliases` column in `catalog.xlsx`: export rejected aliases, and
-      import the column as a positive decision (an emptied cell means nothing)
-- [ ] Store: a status setter that moves an alias in **both** directions on
-      explicit human instruction — `add_alias`'s "never degrade" rule guards
-      machine passes, not people
-- [ ] Precedence rule when one alias appears in two columns, plus a collision
-      report in the import outcome
-- [ ] `Evidence` sheet — generated, read-only, ignored by import; entity,
-      candidate text, reason, run, source folder
-- [ ] Verify a rejected alias stays rejected across `learn` → `scan` → export
-      on real data (`add_alias` already refuses to revive it)
+- [x] `rejected_aliases` column in `catalog.xlsx`, exported and imported as a
+      positive decision; an emptied cell means nothing
+- [x] `store.set_alias_status` moves an alias in both directions on explicit
+      human instruction; `add_alias` keeps its upgrade-only rule for machines
+- [x] Precedence when one alias sits in two columns: rejection wins, and the
+      collision is reported (`ImportOutcome.collisions`, shown by `learn`)
+- [x] `Evidence` sheet — generated, read-only, ignored by import
+- [x] Covered by tests: matching skips a rejection, a later pass never revives
+      it, and it is reversible (`tests/test_catalog_rejection.py`)
+- [ ] Exercise the same cycle against the real workbooks, not fixtures
 - [ ] Bulk candidate review flow
 - [ ] Coordinate-candidate rejection — **deferred** until a real coordinate
       conflict has been seen; same mechanism is expected to apply
@@ -129,13 +126,11 @@ Unit-tested; not yet exercised end to end against real sources.
 - [ ] Image changed → REVIEW, preview refreshed, finals kept
 - [ ] Description changed (and changed after APPROVED) → distinct reasons
 - [ ] Photo removed → `SOURCE_MISSING`, row and metadata kept
-- [ ] Description document deleted → the row keeps yesterday's source text and
-      is marked **stale** (derived from `source_entry_exists` + non-empty source
-      columns, nothing new persisted); diagnostic in `Review Reason`, coverage
-      still `NO_ENTRY`
-- [ ] Photo returns after `SOURCE_MISSING` → `REVIEW` with a new `Photo
-      returned` reason, not `Source photo changed`; the previous status is not
-      restored
+- [x] Description document deleted → the row keeps yesterday's source text and
+      is flagged stale in `Review Reason`; derived, nothing new persisted, and
+      `Status` untouched
+- [x] Photo returns after `SOURCE_MISSING` → `REVIEW` with its own `Photo
+      returned` reason; the previous status is not restored
 - [ ] `DESCRIBED_ABSENT` photo appears → same row reused
 - [ ] New photos added to an existing folder
 - [ ] Nested folders (both real sources are flat — untested live)
@@ -164,6 +159,9 @@ No workbooks in pure intermediate directories.
 - [ ] `catalog.xlsx` at the root; decide placement for `review-all.html`
 - [x] Portable `_archive_state/` holding Drive ids, hashes, fingerprints, evidence
 - [x] `run` publishes a complete snapshot; `record_listing` tracks source items
+- [x] `run` publishes portable state **before** rendering the dashboard — the
+      dashboard reads coverage from it, so the old order reported each run
+      using the previous run's observations
 - [x] Three-way workbook sync rules, generation guard, `bootstrap` command
 - [x] Semantic three-way merge + Excel conflict workbook + `resolve-conflicts`
 - [x] Semantic normalization before conflict classification (People/Tags/Albums/
@@ -300,24 +298,23 @@ beyond what already exists; the follow-ons are below.
 Source-description coverage is **not** a workflow status and never gates
 anything — see the architecture doc. Implementation steps:
 
-- [ ] Persist the folder record (status + selected document) in `SourceState`;
-      decide keying and what happens when a folder disappears
-- [ ] Persist `source_entry_exists` per row — `RowState` → portable
-      `ItemState` via `_apply_row_state`. Do **not** reuse the latent
-      `description_hash is not None` signal: it is an accident of change
-      detection
-- [ ] Derive `PhotoDescriptionCoverage` from those observations plus the
-      workbook source columns; never store the classification
-- [ ] Classify source-note patterns explicitly (`SOURCE_STATE` / `DESCRIPTIVE`);
-      make `SOURCE_NOTE_PATTERNS` a pattern → class mapping so an unclassified
-      pattern cannot be added
-- [ ] Make "no coverage outside `FOUND`" structural (`| None` or a result type
-      carrying folder status), not a convention
+- [x] Folder record (status + document + candidates) in `SourceState.folders`,
+      keyed by folder path; a scoped run updates only the folders it visited
+- [ ] Decide what happens to a folder record when its folder disappears
+- [x] `source_entry_exists` per row: `RowState` → `ItemState`, not derived from
+      the latent `description_hash` signal
+- [x] `PhotoDescriptionCoverage` derived in `photoarchive/coverage.py` from
+      those observations plus the workbook source columns; never stored
+- [x] `SOURCE_NOTE_PATTERNS` is a pattern → `SourceNoteKind` mapping, so an
+      unclassified pattern cannot be added
+- [x] "No coverage outside `FOUND`" is structural: `classify()` takes the
+      folder status and returns `PhotoDescriptionCoverage | None`
 - [ ] Delete or repurpose the unused `PhotoReviewRecord` (`models.py:110`) and
       its never-populated `description_document` field
-- [ ] Tests: the invariant above; "`UNKNOWN` never counts as needing
-      description"; "no photo-level value outside `FOUND`"; the stale
-      source-column case (§6)
+- [x] Tests: `UNKNOWN` counts nothing, no photo-level value outside `FOUND`,
+      the four-value breakdown, `DESCRIBED_ABSENT` excluded from photo counts
+      (`tests/test_coverage.py`)
+- [x] Stale-source-text flag wired into `Review Reason` (§6)
 - [ ] Pin the invariant with tests: every physical source photo always gets a
       normal editable `review.xlsx` row, whatever its coverage value and
       whatever the folder's description-document state (holds today via
