@@ -138,6 +138,13 @@ class ItemState:
     description_hash: str | None = None
     suggestion_hash: str | None = None
     was_absent: bool = False
+    #: Archive-wide identity of the photograph. Assigned once and carried, so
+    #: it survives a move between folders — which is the point of having it.
+    photo_id: str | None = None
+    #: Fingerprint of the picture itself, for finding rescans of one print.
+    #: Nothing reads it yet; it is recorded because it can only be computed
+    #: from a downloaded photo, and a late start would mean re-fetching.
+    image_fingerprint: str | None = None
     #: Did the folder's description document have an entry for this row? A raw
     #: observation: an entry with empty text and a photo the document never
     #: mentions leave identical workbook rows, and only this tells them apart.
@@ -170,6 +177,8 @@ class ItemState:
             "description_hash": self.description_hash,
             "suggestion_hash": self.suggestion_hash,
             "was_absent": self.was_absent,
+            "photo_id": self.photo_id,
+            "image_fingerprint": self.image_fingerprint,
             "source_entry_exists": self.source_entry_exists,
         }
         if self.build_fingerprint or self.last_build:
@@ -210,6 +219,8 @@ class ItemState:
             description_hash=data.get("description_hash"),
             suggestion_hash=data.get("suggestion_hash"),
             was_absent=bool(data.get("was_absent", False)),
+            photo_id=data.get("photo_id"),
+            image_fingerprint=data.get("image_fingerprint"),
             source_entry_exists=bool(data.get("source_entry_exists", False)),
         )
 

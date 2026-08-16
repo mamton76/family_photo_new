@@ -535,3 +535,92 @@ def test_a_row_that_never_had_a_description_is_not_stale() -> None:
 
     assert outcome.stale_source_text == []
     assert outcome.rows[0].review_reason == ""
+
+
+# -- Lasting identity and picture fingerprint ------------------------------
+
+
+def test_a_photo_id_is_assigned_once_and_then_carried() -> None:
+    outcome, states = _first_scan()
+    assigned = outcome.rows[0].photo_id
+    assert assigned.startswith("photo-")
+
+    rescan, next_states = build_rows(
+        _reconciliation((_entry("020"), _photo("020.jpg"))),
+        {"020": SUGGESTION},
+        existing={"020": outcome.rows[0]},
+        states=states,
+    )
+
+    assert rescan.rows[0].photo_id == assigned
+    assert next_states["020"].photo_id == assigned
+
+
+def test_a_photo_id_survives_a_lost_workbook() -> None:
+    """The pipeline's own memory is enough; the column is a display copy."""
+    outcome, states = _first_scan()
+    assigned = outcome.rows[0].photo_id
+
+    rebuilt, _ = build_rows(
+        _reconciliation((_entry("020"), _photo("020.jpg"))),
+        {"020": SUGGESTION},
+        existing={},
+        states=states,
+    )
+
+    assert rebuilt.rows[0].photo_id == assigned
+
+
+def test_a_fingerprint_is_kept_when_a_photo_cannot_be_fetched() -> None:
+    """A scan that fetched nothing must not erase what an earlier one learned."""
+    reconciliation = _reconciliation((_entry("020"), _photo("020.jpg")))
+    outcome, states = build_rows(
+        reconciliation, {"020": SUGGESTION}, fingerprints={"020": "ceda9e969cbebafc"}
+    )
+    assert states["020"].image_fingerprint == "ceda9e969cbebafc"
+
+    _, next_states = build_rows(
+        reconciliation,
+        {"020": SUGGESTION},
+        existing={"020": outcome.rows[0]},
+        states=states,
+        fingerprints={},
+    )
+
+    assert next_states["020"].image_fingerprint == "ceda9e969cbebafc"
+
+
+def test_two_rows_never_share_a_photo_id() -> None:
+    outcome, _ = build_rows(
+        _reconciliation(
+            (_entry("020"), _photo("020.jpg")), undescribed=[_photo("021.jpg")]
+        ),
+        {},
+    )
+
+    ids = {row.photo_id for row in outcome.rows}
+    assert len(ids) == len(outcome.rows)
+
+
+def test_a_source_change_never_overturns_a_duplicate_verdict() -> None:
+    """`DUPLICATE` is a person's ruling on the photograph, like `SKIP`."""
+    reconciliation = _reconciliation((_entry("020"), _photo("020.jpg")))
+    outcome, states = build_rows(
+        reconciliation, {"020": SUGGESTION}, photo_hashes={"020": "hash-one"}
+    )
+    row = outcome.rows[0]
+    row.status = WorkflowStatus.DUPLICATE
+    row.notes = "дубль photo-abc123def456"
+
+    rescan, _ = build_rows(
+        reconciliation,
+        {"020": SUGGESTION},
+        existing={"020": row},
+        states=states,
+        photo_hashes={"020": "hash-two"},
+    )
+
+    updated = rescan.rows[0]
+    assert updated.status is WorkflowStatus.DUPLICATE
+    assert updated.review_reason == REASON_SOURCE_PHOTO_CHANGED
+    assert updated.notes == "дубль photo-abc123def456"

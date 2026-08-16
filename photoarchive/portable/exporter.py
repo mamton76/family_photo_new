@@ -210,6 +210,10 @@ def _apply_row_state(item: ItemState, row_state: RowState) -> None:
     item.status = row_state.status or item.status
     item.was_absent = row_state.was_absent
     item.source_entry_exists = row_state.source_entry_exists
+    # Both are assigned once and only carried: never blank out what an earlier
+    # scan recorded because this one could not fetch the photo.
+    item.photo_id = row_state.photo_id or item.photo_id
+    item.image_fingerprint = row_state.image_fingerprint or item.image_fingerprint
 
 
 def _apply_physical(

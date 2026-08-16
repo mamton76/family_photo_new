@@ -47,6 +47,9 @@ REVIEW_FILENAME = "review.xlsx"
 VISIBLE_COLUMNS: tuple[str, ...] = (
     "Preview",
     "Filename / Reference",
+    # Machine-owned and read-only: the handle by which one copy of a
+    # photograph can be pointed at another by hand.
+    "Photo ID",
     "Source Description",
     "Section Context",
     "Source Notes",
@@ -90,6 +93,7 @@ FINAL_COLUMNS: frozenset[str] = frozenset(
 #: Attribute on :class:`ReviewRow` backing each column.
 _COLUMN_ATTRIBUTES: dict[str, str] = {
     "Filename / Reference": "filename_or_reference",
+    "Photo ID": "photo_id",
     "Source Description": "source_description",
     "Section Context": "section_context",
     "Source Notes": "source_notes",
@@ -145,7 +149,7 @@ _HYPERLINK_FONT = Font(color="0563C1", underline="single")
 
 #: Bumped whenever the sheet's presentation changes — comments, validation,
 #: column set or widths — so every workbook is rewritten exactly once.
-LAYOUT_VERSION = 3
+LAYOUT_VERSION = 4
 
 
 def column_index(name: str) -> int:
@@ -421,6 +425,47 @@ class ReviewWorkbookService:
         worksheet.add_data_validation(validation)
         letter = get_column_letter(column_index("Status"))
         validation.add(f"{letter}2:{letter}{row_count + 1}")
+
+
+def image_fingerprint(source_image: Path) -> str | None:
+    """A short fingerprint of the *picture*, not of the file.
+
+    Two scans of one paper photograph are different files by every measure the
+    archive already records — different bytes, different provider id, usually a
+    different name. This is the only signal that can connect them: a difference
+    hash, reduced to 9x8 greyscale, one bit per comparison of neighbouring
+    pixels, so brightness, resolution, dust and a small crop barely move it.
+
+    Recorded now and matched later. It is an observation about the image, never
+    a claim that two photographs are the same — that judgement needs a person,
+    because a family album is full of frames taken seconds apart.
+
+    Returns ``None`` for an unreadable image: a fingerprint is never worth
+    failing a scan over.
+    """
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        with Image.open(source_image) as picture:
+            reduced = picture.convert("L").resize((9, 8))
+            pixels = list(reduced.getdata())
+    except (UnidentifiedImageError, OSError, ValueError) as error:
+        LOG.debug("Could not fingerprint %s: %s", source_image.name, error)
+        return None
+
+    bits = 0
+    for row_index in range(8):
+        offset = row_index * 9
+        for column in range(8):
+            bits <<= 1
+            if pixels[offset + column] > pixels[offset + column + 1]:
+                bits |= 1
+    return f"{bits:016x}"
+
+
+def fingerprint_distance(left: str, right: str) -> int:
+    """How many bits two fingerprints differ by; smaller means more alike."""
+    return bin(int(left, 16) ^ int(right, 16)).count("1")
 
 
 def _source_note(row: ReviewRow) -> str:

@@ -11,6 +11,7 @@ that cell is an explicit human act, so it may update the final ``LatLon``.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import ClassVar
@@ -33,6 +34,16 @@ REASON_MAP_LINK_APPLIED = "LatLon updated from Map Link"
 REASON_MAP_LINK_UNPARSED = "Map Link could not be parsed; LatLon left unchanged"
 
 
+def new_photo_id() -> str:
+    """A stable identity for one photograph, assigned once and never derived.
+
+    Deriving it from source root, folder and filename would be tidy and wrong:
+    it would change the moment a photo moves between folders, which is the one
+    case an identity exists to survive. Same shape as the dictionary's own ids.
+    """
+    return f"photo-{uuid.uuid4().hex[:12]}"
+
+
 @dataclass(slots=True)
 class ReviewRow:
     """One row of ``review.xlsx``.
@@ -45,6 +56,9 @@ class ReviewRow:
 
     reference: str
     filename: str = ""
+    #: Archive-wide identity of the photograph, assigned once. Shown in the
+    #: workbook read-only, so one copy can be pointed at another by hand.
+    photo_id: str = ""
 
     # Source text, refreshed from the DOCX on every scan.
     source_description: str = ""

@@ -353,6 +353,11 @@ access; proposes, never mutates on its own.
       signals change at once; make sure the pass says *why* it proposed a link
 - [ ] Three findings kept distinct: moved photo, true duplicate (**report
       only** in v1), orphan description (cross-folder link, manual only)
+- [ ] A fourth finding to design: **several scans of one photograph** — needs a
+      perceptual fingerprint, not a content hash; see
+      [`to-discuss-duplicate-scans.md`](to-discuss-duplicate-scans.md)
+- [ ] Consider recording the perceptual fingerprint early, in `build_preview`,
+      so the data accumulates before the matching exists
 - [ ] Proposals shown in `review-all.html` with both previews; decisions
       entered in a proposals workbook, like `resolve-conflicts`
 - [ ] Applying a move carries finals, `Status` and portable `ItemState`

@@ -45,6 +45,7 @@ from photoarchive.review.model import (
     REASON_SOURCE_PHOTO_CHANGED,
     ReviewRow,
     join_values,
+    new_photo_id,
 )
 
 #: Resolves a place value to a confirmed dictionary entry (route B).
@@ -80,6 +81,10 @@ class RowState:
     suggestion_hash: str = ""
     status: str = WorkflowStatus.NEW.value
     was_absent: bool = False
+    #: Assigned once and kept for the life of the photograph.
+    photo_id: str = ""
+    #: Fingerprint of the picture, for finding rescans of one print later.
+    image_fingerprint: str = ""
     #: Whether the folder's description document had an entry for this row.
     #: A raw observation, not a classification: an entry with empty text and a
     #: photo the document never mentions leave identical workbook rows, so
@@ -122,6 +127,7 @@ def build_rows(
     photo_hashes: dict[str, str] | None = None,
     place_lookup: PlaceLookup | None = None,
     descriptions_readable: bool = True,
+    fingerprints: dict[str, str] | None = None,
 ) -> tuple[BuildOutcome, dict[str, RowState]]:
     """Produce the rows for one folder, merging with what came before.
 
@@ -135,6 +141,7 @@ def build_rows(
     existing = existing or {}
     states = states or {}
     photo_hashes = photo_hashes or {}
+    fingerprints = fingerprints or {}
 
     outcome = BuildOutcome()
     next_states: dict[str, RowState] = {}
@@ -143,7 +150,7 @@ def build_rows(
     for reconciled in reconciliation.entries:
         row, state = _build_entry_row(
             reconciled, suggestions, existing, states, photo_hashes, outcome,
-            place_lookup,
+            place_lookup, fingerprints,
         )
         outcome.rows.append(row)
         next_states[state.identity] = state
@@ -155,7 +162,7 @@ def build_rows(
             continue
         row, state = _build_photo_row(
             photo.name, photo.relative_path, suggestions, existing, states,
-            photo_hashes, outcome, place_lookup,
+            photo_hashes, outcome, place_lookup, fingerprints,
         )
         outcome.rows.append(row)
         next_states[state.identity] = state
@@ -181,7 +188,13 @@ def build_rows(
         _flag(previous, WorkflowStatus.SOURCE_MISSING, REASON_SOURCE_MISSING)
         outcome.rows.append(previous)
         outcome.went_missing.append(key)
-        next_states[key] = RowState(identity=key, status=previous.status.value)
+        kept = states.get(key)
+        next_states[key] = RowState(
+            identity=key,
+            status=previous.status.value,
+            photo_id=(kept.photo_id if kept else "") or previous.photo_id,
+            image_fingerprint=kept.image_fingerprint if kept else "",
+        )
 
     return outcome, next_states
 
@@ -194,6 +207,7 @@ def _build_entry_row(
     photo_hashes: dict[str, str],
     outcome: BuildOutcome,
     place_lookup: PlaceLookup | None = None,
+    fingerprints: dict[str, str] | None = None,
 ) -> tuple[ReviewRow, RowState]:
     entry = reconciled.entry
     key = identity_key(entry.reference)
@@ -214,6 +228,8 @@ def _build_entry_row(
     row = existing.get(key)
     previous = states.get(key)
 
+    photo_id, fingerprint = _identity_of(key, row, previous, fingerprints)
+
     if row is None:
         row = ReviewRow(reference=entry.reference)
         _apply_source(row, entry, photo, source_notes)
@@ -223,6 +239,7 @@ def _build_entry_row(
         row.status = (
             WorkflowStatus.NEW if photo is not None else WorkflowStatus.DESCRIBED_ABSENT
         )
+        row.photo_id = photo_id
         outcome.created.append(key)
         return row, RowState(
             identity=key,
@@ -231,6 +248,8 @@ def _build_entry_row(
             suggestion_hash=suggestion_hash,
             status=row.status.value,
             was_absent=photo is None,
+            photo_id=photo_id,
+            image_fingerprint=fingerprint,
             source_entry_exists=True,
         )
 
@@ -269,12 +288,13 @@ def _build_entry_row(
         )
         outcome.description_changed.append(key)
     elif photo is None:
-        if row.status is not WorkflowStatus.SKIP:
+        if row.status not in _HUMAN_VERDICTS:
             row.status = WorkflowStatus.DESCRIBED_ABSENT
         outcome.unchanged.append(key)
     else:
         outcome.unchanged.append(key)
 
+    row.photo_id = photo_id
     return row, RowState(
         identity=key,
         photo_hash=photo_hash or (previous.photo_hash if previous else ""),
@@ -282,6 +302,8 @@ def _build_entry_row(
         suggestion_hash=suggestion_hash,
         status=row.status.value,
         was_absent=photo is None,
+        photo_id=photo_id,
+        image_fingerprint=fingerprint,
         source_entry_exists=True,
     )
 
@@ -295,6 +317,7 @@ def _build_photo_row(
     photo_hashes: dict[str, str],
     outcome: BuildOutcome,
     place_lookup: PlaceLookup | None = None,
+    fingerprints: dict[str, str] | None = None,
 ) -> tuple[ReviewRow, RowState]:
     """A present photo that no description mentions."""
     key = identity_key(filename)
@@ -303,17 +326,21 @@ def _build_photo_row(
 
     row = existing.get(key)
     previous = states.get(key)
+    photo_id, fingerprint = _identity_of(key, row, previous, fingerprints)
 
     if row is None:
         row = ReviewRow(reference=key, filename=filename, source_path=source_path)
         _apply_suggestions(row, suggestion)
         row.seed_final_from_suggestions()
         row.status = WorkflowStatus.NEW
+        row.photo_id = photo_id
         outcome.created.append(key)
         return row, RowState(
             identity=key,
             photo_hash=photo_hash,
             status=row.status.value,
+            photo_id=photo_id,
+            image_fingerprint=fingerprint,
         )
 
     row.filename = filename
@@ -336,10 +363,13 @@ def _build_photo_row(
 
     _mark_stale_source_text(row, outcome, key)
 
+    row.photo_id = photo_id
     return row, RowState(
         identity=key,
         photo_hash=photo_hash or (previous.photo_hash if previous else ""),
         status=row.status.value,
+        photo_id=photo_id,
+        image_fingerprint=fingerprint,
     )
 
 
@@ -450,6 +480,31 @@ def _apply_map_link(row: ReviewRow, outcome: BuildOutcome, key: str) -> None:
     outcome.map_links_applied.append(key)
 
 
+def _identity_of(
+    key: str,
+    row: ReviewRow | None,
+    previous: RowState | None,
+    fingerprints: dict[str, str] | None,
+) -> tuple[str, str]:
+    """The row's lasting identity and picture fingerprint.
+
+    The id is assigned once and then only carried: from the pipeline's own
+    memory first, then from the workbook, and only invented when neither knows
+    it. The fingerprint is refreshed whenever the photo was actually fetched,
+    and otherwise kept — an unreadable or undownloaded photo must not erase
+    what an earlier scan already learned about the picture.
+    """
+    photo_id = (
+        (previous.photo_id if previous else "")
+        or (row.photo_id if row else "")
+        or new_photo_id()
+    )
+    fingerprint = (fingerprints or {}).get(key) or (
+        previous.image_fingerprint if previous else ""
+    )
+    return photo_id, fingerprint
+
+
 def _returned(previous: RowState | None, present: bool) -> bool:
     """True when a photo the pipeline had given up on is back in the source."""
     return bool(
@@ -482,17 +537,22 @@ def _mark_stale_source_text(row: ReviewRow, outcome: BuildOutcome, key: str) -> 
         row.review_reason = REASON_SOURCE_TEXT_STALE
 
 
-def _flag(row: ReviewRow, status: WorkflowStatus, reason: str) -> None:
-    """Record why a row changed, and move it to ``status`` — unless it is SKIP.
+#: Decisions a person made about the photograph itself, which a scan reports
+#: against but never overturns. ``SKIP`` says do not archive this at all;
+#: ``DUPLICATE`` says another row holds the copy the archive keeps. Neither is
+#: a claim about the description, so a rewritten entry cannot undo them.
+_HUMAN_VERDICTS = frozenset({WorkflowStatus.SKIP, WorkflowStatus.DUPLICATE})
 
-    ``SKIP`` is a person saying *do not archive this photograph*. It is about
-    the photo itself, not about its description, so neither a rewritten DOCX
-    entry nor a re-scanned image overturns it. The change is still reported in
-    ``Review Reason``, so the decision can be revisited deliberately rather
-    than reversed silently.
+
+def _flag(row: ReviewRow, status: WorkflowStatus, reason: str) -> None:
+    """Record why a row changed, and move it to ``status`` — unless a person
+    has already ruled on the photograph.
+
+    The change is still reported in ``Review Reason``, so the decision can be
+    revisited deliberately rather than reversed silently.
     """
     row.review_reason = reason
-    if row.status is not WorkflowStatus.SKIP:
+    if row.status not in _HUMAN_VERDICTS:
         row.status = status
 
 

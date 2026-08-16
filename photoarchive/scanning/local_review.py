@@ -35,6 +35,7 @@ from photoarchive.parsing.descriptions import (
 from photoarchive.parsing.suggestions import Suggestion, suggest
 from photoarchive.review.builder import BuildOutcome, RowState, build_rows
 from photoarchive.review.excel import (
+    image_fingerprint,
     REVIEW_FILENAME,
     ReviewWorkbookService,
     WorkbookPreview,
@@ -128,7 +129,7 @@ def generate_folder_review(
     # file is left completely alone: same bytes, same mtime, nothing to upload.
     previous_signature = rows_signature(list(existing.values()))
 
-    previews, photo_hashes = _prepare_previews(
+    previews, photo_hashes, fingerprints = _prepare_previews(
         plan.photos, cache_dir, fetch_photo, source_root, plan.folder_path
     )
 
@@ -138,6 +139,7 @@ def generate_folder_review(
         existing=existing,
         states=existing_states,
         photo_hashes=photo_hashes,
+        fingerprints=fingerprints,
         # Route B: a Place the reviewer typed is itself a dictionary key for
         # coordinates, which is the only route available without a DOCX.
         place_lookup=lambda value: resolve_place(dictionary, value),
@@ -204,13 +206,14 @@ def _prepare_previews(
     fetch_photo: PhotoFetcher | None,
     source_root: SourceRoot,
     folder_path: str,
-) -> tuple[dict[str, WorkbookPreview], dict[str, str]]:
+) -> tuple[dict[str, WorkbookPreview], dict[str, str], dict[str, str]]:
     """Download photos and build thumbnails; sources are never modified."""
     previews: dict[str, WorkbookPreview] = {}
     hashes: dict[str, str] = {}
+    fingerprints: dict[str, str] = {}
 
     if fetch_photo is None:
-        return previews, hashes
+        return previews, hashes, fingerprints
 
     for photo in photos:
         key = identity_key(photo.name)
@@ -224,6 +227,11 @@ def _prepare_previews(
             continue
 
         hashes[key] = photo.content_hash or _file_hash(Path(fetched))
+        # The photo is open anyway for the thumbnail, so the picture's own
+        # fingerprint costs nothing extra. Nothing reads it yet.
+        fingerprint = image_fingerprint(Path(fetched))
+        if fingerprint:
+            fingerprints[key] = fingerprint
 
         thumbnail = (
             Path(cache_dir) / "previews" / source_root.identity / folder_path / f"{key}.png"
@@ -240,7 +248,7 @@ def _prepare_previews(
         previews[photo.name] = preview
         previews[Path(photo.name).stem] = preview
 
-    return previews, hashes
+    return previews, hashes, fingerprints
 
 
 def _file_hash(path: Path) -> str:

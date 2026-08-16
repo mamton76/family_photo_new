@@ -25,6 +25,7 @@ from photoarchive.review.model import ReviewRow, join_values, split_values
 EXPECTED_COLUMNS = (
     "Preview",
     "Filename / Reference",
+    "Photo ID",
     "Source Description",
     "Section Context",
     "Source Notes",
@@ -261,3 +262,46 @@ def test_a_layout_change_rewrites_an_otherwise_unchanged_workbook() -> None:
         excel_module.LAYOUT_VERSION = original
 
     assert rows_signature(rows) == before
+
+
+def test_the_photo_id_column_round_trips(tmp_path: Path) -> None:
+    """The workbook carries the id so one copy can be pointed at another."""
+    row = ReviewRow(reference="020", filename="020.jpg")
+    row.photo_id = "photo-abc123def456"
+
+    path = tmp_path / "review.xlsx"
+    ReviewWorkbookService().write(path, [row])
+    read_back = ReviewWorkbookService().read(path)
+
+    assert read_back["020"].photo_id == "photo-abc123def456"
+
+
+def test_the_fingerprint_survives_rescanning_the_same_picture(tmp_path: Path) -> None:
+    """Resolution and brightness move it barely; that is the whole point."""
+    from PIL import Image, ImageEnhance
+
+    from photoarchive.review.excel import fingerprint_distance, image_fingerprint
+
+    original = tmp_path / "photo.jpg"
+    picture = Image.new("RGB", (400, 300))
+    for x in range(400):
+        for y in range(300):
+            picture.putpixel((x, y), (x % 256, (x * y) % 256, y % 256))
+    picture.save(original)
+
+    rescanned = tmp_path / "rescan.jpg"
+    smaller = picture.resize((240, 180))
+    ImageEnhance.Brightness(smaller).enhance(1.2).save(rescanned)
+
+    assert fingerprint_distance(
+        image_fingerprint(original), image_fingerprint(rescanned)
+    ) <= 4
+
+
+def test_an_unreadable_image_has_no_fingerprint(tmp_path: Path) -> None:
+    from photoarchive.review.excel import image_fingerprint
+
+    broken = tmp_path / "broken.jpg"
+    broken.write_bytes(b"not an image")
+
+    assert image_fingerprint(broken) is None

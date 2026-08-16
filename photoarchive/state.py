@@ -101,11 +101,13 @@ CREATE TABLE IF NOT EXISTS review_rows (
     root_identity    TEXT NOT NULL,
     folder_path      TEXT NOT NULL,
     identity         TEXT NOT NULL,
-    photo_hash       TEXT,
-    description_hash TEXT,
-    suggestion_hash  TEXT,
-    status           TEXT,
-    was_absent       INTEGER NOT NULL DEFAULT 0,
+    photo_hash        TEXT,
+    description_hash  TEXT,
+    suggestion_hash   TEXT,
+    status            TEXT,
+    was_absent        INTEGER NOT NULL DEFAULT 0,
+    photo_id          TEXT,
+    image_fingerprint TEXT,
     last_scan        TEXT,
     UNIQUE (root_identity, folder_path, identity)
 );
@@ -149,6 +151,25 @@ class ChangeSet:
     unchanged: tuple[str, ...] = ()
 
 
+#: Columns added to existing databases. ``CREATE TABLE IF NOT EXISTS`` leaves a
+#: table that already exists untouched, so a new column reaches an established
+#: archive only by being added explicitly.
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("review_rows", "photo_id", "TEXT"),
+    ("review_rows", "image_fingerprint", "TEXT"),
+)
+
+
+def _add_missing_columns(cursor) -> None:
+    """Bring an older database up to the current schema, in place."""
+    for table, column, kind in _ADDED_COLUMNS:
+        existing = {
+            row["name"] for row in cursor.execute(f"PRAGMA table_info({table})")
+        }
+        if column not in existing:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+
+
 class StateRepository:
     """Thin SQLite repository for scan/build/publish bookkeeping.
 
@@ -179,6 +200,7 @@ class StateRepository:
         """Create the schema if it does not exist. Safe to call repeatedly."""
         with self.connect() as connection, closing(connection.cursor()) as cursor:
             cursor.executescript(_SCHEMA)
+            _add_missing_columns(cursor)
             row = cursor.execute("SELECT version FROM schema_info").fetchone()
             if row is None:
                 cursor.execute(
@@ -365,6 +387,8 @@ class StateRepository:
                 suggestion_hash=row["suggestion_hash"] or "",
                 status=row["status"] or "",
                 was_absent=bool(row["was_absent"]),
+                photo_id=row["photo_id"] or "",
+                image_fingerprint=row["image_fingerprint"] or "",
             )
             for row in rows
         }
@@ -379,13 +403,16 @@ class StateRepository:
                 connection.execute(
                     "INSERT INTO review_rows (root_identity, folder_path, identity,"
                     " photo_hash, description_hash, suggestion_hash, status, was_absent,"
-                    " last_scan) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    " photo_id, image_fingerprint, last_scan)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     " ON CONFLICT (root_identity, folder_path, identity) DO UPDATE SET"
                     " photo_hash = excluded.photo_hash,"
                     " description_hash = excluded.description_hash,"
                     " suggestion_hash = excluded.suggestion_hash,"
                     " status = excluded.status,"
                     " was_absent = excluded.was_absent,"
+                    " photo_id = excluded.photo_id,"
+                    " image_fingerprint = excluded.image_fingerprint,"
                     " last_scan = excluded.last_scan",
                     (
                         root_identity,
@@ -396,6 +423,8 @@ class StateRepository:
                         state.suggestion_hash,
                         state.status,
                         int(state.was_absent),
+                        state.photo_id or None,
+                        state.image_fingerprint or None,
                         timestamp,
                     ),
                 )

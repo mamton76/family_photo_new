@@ -26,6 +26,9 @@ class WorkflowStatus(str, Enum):
     #: scanned source folder. Distinct from SOURCE_MISSING, which means a photo
     #: the pipeline saw before has since disappeared.
     DESCRIBED_ABSENT = "DESCRIBED_ABSENT"
+    #: Another row holds the copy of this photograph that the archive keeps.
+    #: Unlike SKIP, the photograph *is* archived — just not through this file.
+    DUPLICATE = "DUPLICATE"
     ERROR = "ERROR"
     SKIP = "SKIP"
 
